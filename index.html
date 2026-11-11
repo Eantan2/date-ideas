@@ -19,17 +19,25 @@
     <div class="top-in">
       <div class="title-row">
         <h1>Date Ideas 💕</h1>
-        <button id="filterBtn" class="pill">Filter</button>
+        <div class="btns">
+          <button id="refreshBtn" class="pill" aria-label="Refresh">↻</button>
+          <button id="filterBtn" class="pill">Filter</button>
+        </div>
       </div>
       <div id="tabs" class="tabs">
         <button data-tab="todo">To do</button>
         <button data-tab="done">Done</button>
         <button data-tab="all">All</button>
       </div>
+      <div id="banner" class="banner hidden"></div>
     </div>
   </div>
 
-  <main id="list"></main>
+  <main>
+    <div id="migrate" class="migrate hidden"></div>
+    <div id="list"></div>
+    <div id="foot" class="foot"></div>
+  </main>
 
   <button id="addBtn" class="fab" aria-label="Add idea">+</button>
 
@@ -37,6 +45,11 @@
     <div id="sheetInner" class="sheet-inner"></div>
   </div>
 
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Supabase library (loaded from the jsDelivr CDN), then your settings, then the app -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

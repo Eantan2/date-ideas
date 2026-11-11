@@ -1,6 +1,7 @@
-// Lets the app open without internet. Tries the network first so updates show up right away.
-const CACHE = 'date-ideas-v1';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+// Keeps the app's own files so it opens quickly. Tries the network first so updates show up right away.
+// It never touches requests to other sites (like Supabase), so your ideas are always fresh.
+const CACHE = 'date-ideas-v2';
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)));
@@ -17,6 +18,7 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).origin !== self.location.origin) return; // leave other sites alone
   e.respondWith(
     fetch(e.request)
       .then((res) => {
