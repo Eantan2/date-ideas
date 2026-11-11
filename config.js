@@ -8,6 +8,6 @@
 //
 // NEVER paste a "secret" or "service_role" key here. Anyone could read this file.
 window.APP_CONFIG = {
-  SUPABASE_URL: 'https://YOUR-PROJECT-ID.supabase.co',
-  SUPABASE_KEY: 'YOUR-PUBLISHABLE-KEY',
+  SUPABASE_URL: 'https://icimierbxmvvxhxfkmuy.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_c8mYuVy0ZDOg8I2_OdiXyA_HeALZ1yg',
 };
