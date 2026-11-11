@@ -4,4 +4,4 @@ A simple phone-style web app for saving and organizing date ideas. Everything is
 
 Plain HTML, CSS and JavaScript. No build step: open `index.html`, or host the folder on GitHub Pages.
 
-Made for date nights!
+Made for our date nights!
