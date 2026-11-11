@@ -705,13 +705,17 @@ function showLogin(msg = '') {
          <div class="field"><label>Email</label>
            <input type="email" id="l-email" autocomplete="username" autocapitalize="none" autocorrect="off" inputmode="email" required></div>
          <div class="field"><label>Password</label>
-           <input type="password" id="l-pass" autocomplete="current-password" required></div>
+           <input type="password" id="l-pass" autocomplete="current-password" autocapitalize="none" autocorrect="off" required></div>
+         <label style="display:flex;align-items:center;gap:8px;margin:-4px 0 14px;font-size:15px;color:var(--muted)"><input type="checkbox" id="l-show"> Show password</label>
          <div class="error" id="loginError">${esc(msg)}</div>
          <button class="btn" type="submit" id="loginBtn">Sign in</button>
        </form>
      </div>`,
     {}
   );
+  $('#l-show').addEventListener('change', (e) => {
+    $('#l-pass').type = e.target.checked ? 'text' : 'password';
+  });
   $('#loginForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = $('#loginBtn');
