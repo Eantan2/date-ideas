@@ -1,6 +1,6 @@
 // Keeps the app's own files so it opens quickly. Tries the network first so updates show up right away.
 // It never touches requests to other sites (like Supabase), so your ideas are always fresh.
-const CACHE = 'date-ideas-v2';
+const CACHE = 'date-ideas-v3';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
