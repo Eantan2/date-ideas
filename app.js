@@ -660,28 +660,41 @@ function reactionChip(id) {
   return e.length ? `<span class="chip">${e.join(' ')}</span>` : '';
 }
 
+// Gives each card one of five colours. It comes from the id, so a card keeps its colour.
+function colorOf(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) % 997;
+  return 'c' + (h % 5);
+}
+
+function emptyBox(pose, title, text) {
+  return `<div class="empty">${mascot(pose, 120)}<b>${title}</b>${text}</div>`;
+}
+
 function cardHtml(i) {
   const u = photoUrl(i.image);
-  const thumb = u ? `<img class="thumb" src="${esc(u)}" alt="">` : `<div class="thumb">💕</div>`;
+  const thumb = u ? `<img class="thumb" src="${esc(u)}" alt="">` : `<div class="thumb">${miniHeart()}</div>`;
   const done = i.done ? `<span class="chip ok">✓ Done ${esc(fmtDate(i.doneDate))}</span>` : '';
-  return `<div class="card ${i.done ? 'done' : ''}" data-id="${esc(i.id)}">
-    ${thumb}
-    <div class="card-body">
-      <div class="card-title">${esc(i.title)}</div>
-      ${i.address ? `<div class="card-sub">${esc(i.address)}</div>` : ''}
-      ${done}${reactionChip(i.id)}${chipsHtml(i)}
+  return `<div class="card ${colorOf(i.id)} ${i.done ? 'done' : ''}" data-id="${esc(i.id)}">
+    <div class="card-top">
+      <div class="card-body">
+        <div class="card-title">${esc(i.title)}</div>
+        ${i.address ? `<div class="card-sub">${esc(i.address)}</div>` : ''}
+      </div>
+      ${thumb}
     </div>
+    <div>${done}${reactionChip(i.id)}${chipsHtml(i)}</div>
   </div>`;
 }
 
 function recipeCardHtml(r) {
   const n = r.ingredients.split('\n').filter((l) => l.trim()).length;
-  return `<div class="card" data-rid="${esc(r.id)}">
-    <div class="thumb">🍳</div>
-    <div class="card-body">
-      <div class="card-title">${esc(r.title)}</div>
-      ${r.servings ? `<span class="chip">Serves ${esc(fmtNum(r.servings))}</span>` : ''}<span class="chip">${n} ingredient${n === 1 ? '' : 's'}</span>
+  return `<div class="card ${colorOf(r.id)}" data-rid="${esc(r.id)}">
+    <div class="card-top">
+      <div class="card-body"><div class="card-title">${esc(r.title)}</div></div>
+      <div class="thumb">🍳</div>
     </div>
+    <div>${r.servings ? `<span class="chip">Serves ${esc(fmtNum(r.servings))}</span>` : ''}<span class="chip">${n} ingredient${n === 1 ? '' : 's'}</span></div>
   </div>`;
 }
 
@@ -696,18 +709,20 @@ function renderList() {
 
   let html;
   if (!loaded) {
-    html = `<div class="empty">${loadFailed ? "Your ideas didn't load." : 'Loading…'}</div>`;
+    html = loadFailed ? emptyBox('oops', 'Oops', "Your ideas didn't load.") : emptyBox('loading', 'Loading…', 'Fetching your ideas');
   } else if (isRecipes) {
     const list = visibleRecipes();
-    if (!featuresReady) html = `<div class="empty">${SETUP_HINT}</div>`;
+    if (!featuresReady) html = emptyBox('oops', 'One more step', SETUP_HINT);
     else if (list.length) html = list.map(recipeCardHtml).join('');
-    else if (recipes.length) html = `<div class="empty">No recipes match your search.</div>`;
-    else html = `<div class="empty">No recipes yet.<br>Tap the + button to add one.</div>`;
+    else if (recipes.length) html = emptyBox('empty', 'Nothing found', 'No recipes match your search.');
+    else html = emptyBox('empty', 'No recipes yet', 'Tap the + button to add one.');
   } else {
     const list = visibleIdeas();
-    if (list.length) html = list.map(cardHtml).join('');
-    else if (ideas.length === 0) html = `<div class="empty">No ideas yet.<br>Tap the + button to add your first one.</div>`;
-    else html = `<div class="empty">Nothing matches here.<br>Try another tab, search, or reset your filters.</div>`;
+    const todo = ideas.filter((x) => !x.done).length;
+    const welcome = `<div class="welcome">${mascot('wave', 84)}<div><b>${ideas.length ? `${todo} date${todo === 1 ? '' : 's'} to try` : 'Hi, you two!'}</b><span>${ideas.length ? 'Pick one and go!' : 'Let’s plan something fun.'}</span></div></div>`;
+    if (list.length) html = welcome + list.map(cardHtml).join('');
+    else if (ideas.length === 0) html = emptyBox('empty', 'No ideas yet', 'Tap the + button to add your first one.');
+    else html = welcome + emptyBox('empty', 'Nothing matches here', 'Try another tab, search, or reset your filters.');
   }
   $('#list').innerHTML = html;
   const n = Object.values(filters).filter((v) => v !== '').length;
@@ -856,6 +871,7 @@ function showDetail(id) {
             return toast(errText('save', e), true);
           }
           renderList();
+          celebrate();
           if (sheetToken === token) showDetail(id);
         }),
       undo: (b) =>
@@ -1263,12 +1279,26 @@ function showFilters() {
   });
 }
 
+// A short "yay!" screen when a date is marked done. Tap it or wait to close it.
+function celebrate() {
+  const old = $('.celebrate');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'celebrate';
+  el.innerHTML = `${mascot('cheer', 160)}<b>Date done!</b><span>Another memory made 💕</span>`;
+  document.body.appendChild(el);
+  const stop = () => el.remove();
+  el.addEventListener('click', stop);
+  setTimeout(stop, 2200);
+}
+
 // ---------- sign in ----------
 function showLogin(msg = '') {
   openSheet(
     `<div class="sheet-body">
-       <h1 style="margin-top:60px">Date Ideas 💕</h1>
-       <p class="hint" style="margin:6px 0 20px">Sign in to see your ideas on every device.</p>
+       <div class="login-mascot">${mascot('wave', 130)}</div>
+       <h1 style="margin-top:6px;text-align:center">Date Ideas</h1>
+       <p class="hint" style="margin:6px 0 20px;text-align:center">Sign in to see your ideas on every device.</p>
        <form id="loginForm">
          <div class="field"><label>Email</label>
            <input type="email" id="l-email" autocomplete="username" autocapitalize="none" autocorrect="off" inputmode="email" required></div>
@@ -1396,11 +1426,11 @@ async function startApp() {
   }
   const cfg = window.APP_CONFIG || {};
   if (!cfg.SUPABASE_URL || !cfg.SUPABASE_KEY || /YOUR-/.test(cfg.SUPABASE_URL + cfg.SUPABASE_KEY)) {
-    $('#list').innerHTML = `<div class="empty">Setup needed.<br>Open <b>config.js</b> and paste in your Supabase URL and key.</div>`;
+    $('#list').innerHTML = emptyBox('oops', 'Setup needed', 'Open <b>config.js</b> and paste in your Supabase URL and key.');
     return;
   }
   if (!window.supabase) {
-    $('#list').innerHTML = `<div class="empty">Couldn't load the sync code.<br>Check your internet and reload.</div>`;
+    $('#list').innerHTML = emptyBox('oops', "Couldn't load the sync code", 'Check your internet and reload.');
     return;
   }
   sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY);
