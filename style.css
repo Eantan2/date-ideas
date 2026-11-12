@@ -67,7 +67,7 @@ main { max-width: 600px; margin: 0 auto; padding: 8px 16px; }
 /* forms */
 .field { margin-bottom: 14px; }
 .field > label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 4px; }
-input[type=text], input[type=number], input[type=email], input[type=password], input[type=search], select, textarea {
+input[type=text], input[type=number], input[type=email], input[type=url], input[type=password], input[type=search], select, textarea {
   width: 100%; font: inherit; font-size: 16px; padding: 11px 12px;
   border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--text);
 }
@@ -167,7 +167,7 @@ h1 { font-size: 30px; letter-spacing: -.02em; line-height: 1.1; }
 .toast.bad { background: #9A2F1C; }
 .chip { background: #FBE3D8; color: var(--pink-d); }
 .chip.ok { background: #DDEFE4; color: var(--ok); }
-input[type=text], input[type=number], input[type=email], input[type=password], input[type=search], select, textarea { border-radius: 16px; }
+input[type=text], input[type=number], input[type=email], input[type=url], input[type=password], input[type=search], select, textarea { border-radius: 16px; }
 
 /* character */
 .mascot { display: block; overflow: visible; }
@@ -188,3 +188,9 @@ input[type=text], input[type=number], input[type=email], input[type=password], i
 .celebrate b { font-size: 28px; letter-spacing: -.02em; }
 .celebrate span { color: var(--muted); }
 .login-mascot .mascot { margin: 0 auto; }
+
+.keep { display: flex; align-items: flex-start; gap: 10px; background: #fff; border-radius: 18px; padding: 12px 14px; margin: 4px 0 14px; font-size: 15px; }
+.keep input { margin-top: 2px; }
+.pick { margin-top: 8px; border: 0; border-radius: 999px; background: var(--pink); color: #fff; padding: 8px 14px; font-size: 14px; font-weight: 700; }
+.pickcard { cursor: default; }
+a { color: var(--pink-d); }

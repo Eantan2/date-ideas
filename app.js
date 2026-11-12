@@ -719,7 +719,7 @@ function renderList() {
   } else {
     const list = visibleIdeas();
     const todo = ideas.filter((x) => !x.done).length;
-    const welcome = `<div class="welcome">${mascot('wave', 84)}<div><b>${ideas.length ? `${todo} date${todo === 1 ? '' : 's'} to try` : 'Hi, you two!'}</b><span>${ideas.length ? 'Pick one and go!' : 'Let’s plan something fun.'}</span></div></div>`;
+    const welcome = `<div class="welcome">${mascot('wave', 84)}<div><b>${ideas.length ? `${todo} date${todo === 1 ? '' : 's'} to try` : 'Hi, you two!'}</b><span>${ideas.length ? 'Pick one and go!' : 'Let’s plan something fun.'}</span>${todo ? '<button class="pick" data-pick>🎲 Pick one for us</button>' : ''}</div></div>`;
     if (list.length) html = welcome + list.map(cardHtml).join('');
     else if (ideas.length === 0) html = emptyBox('empty', 'No ideas yet', 'Tap the + button to add your first one.');
     else html = welcome + emptyBox('empty', 'Nothing matches here', 'Try another tab, search, or reset your filters.');
@@ -823,6 +823,7 @@ function showDetail(id) {
        ${i.address ? `<div class="sec">Where</div><p class="pre">${esc(i.address)}</p>` : ''}
        ${i.description ? `<div class="sec">About</div><p class="pre">${esc(i.description)}</p>` : ''}
        ${i.notes ? `<div class="sec">Notes</div><p class="pre">${esc(i.notes)}</p>` : ''}
+       ${safeUrl(i.sourceLink) ? `<div class="sec">Source link</div><p class="pre"><a href="${esc(safeUrl(i.sourceLink))}" target="_blank" rel="noopener noreferrer" style="word-break:break-all">${esc(i.sourceLink)}</a></p><p class="hint">${esc(LINK_WARNING)}</p>` : ''}
        ${checklist}
        ${feedbackHtml(i)}
        ${finish}
@@ -954,8 +955,11 @@ function clRow(text = '', done = false) {
   </div>`;
 }
 
-function showForm(id) {
+function showForm(id, prefill) {
   const idea = id ? ideas.find((x) => x.id === id) : null;
+  const pf = !idea && prefill ? prefill : null; // first guess from an import, nothing is saved until Save
+  const src = idea ? idea.sourceLink || '' : pf ? pf.sourceLink || '' : '';
+  const pv = (k, d = '') => (pf && pf[k] != null ? pf[k] : d);
   let image = idea ? idea.image : ''; // saved photo path
   let newBlob = null; // a photo picked just now, not uploaded yet
   let previewUrl = null;
@@ -969,8 +973,9 @@ function showForm(id) {
        <button class="link strong" data-act="save">Save</button>
      </div>
      <div class="sheet-body">
+       ${idea ? '' : pf ? `<p class="hint" style="margin:0 0 12px">Filled in from your import. Check it and fix anything. Only what is below gets saved.</p>` : `<button type="button" class="btn ghost" style="margin:0 0 14px" data-act="import">✨ Import from a link, screenshot or notes</button>`}
        <div class="field"><label>Title *</label>
-         <input type="text" id="f-title" value="${esc(idea ? idea.title : '')}" placeholder="Sunset picnic at the park"></div>
+         <input type="text" id="f-title" value="${esc(idea ? idea.title : pv('title'))}" placeholder="Sunset picnic at the park"></div>
 
        <div class="field"><label>Photo</label>
          <img id="preview" class="hero ${initSrc ? '' : 'hidden'}" ${initSrc ? `src="${esc(initSrc)}"` : ''} alt="">
@@ -978,26 +983,26 @@ function showForm(id) {
          <button type="button" class="link ${image ? '' : 'hidden'}" id="rmPhoto" data-act="rmphoto">Remove photo</button></div>
 
        <div class="field"><label>Location / address</label>
-         <input type="text" id="f-address" value="${esc(idea ? idea.address : '')}" placeholder="123 Main St, or just a place name"></div>
+         <input type="text" id="f-address" value="${esc(idea ? idea.address : pv('address'))}" placeholder="123 Main St, or just a place name"></div>
 
        <div class="row3 field">
          <div><label style="font-size:14px;color:var(--muted)">Cost ($)</label>
-           <input type="number" id="f-cost" inputmode="decimal" min="0" step="any" value="${val(idea && idea.cost)}" placeholder="0"></div>
+           <input type="number" id="f-cost" inputmode="decimal" min="0" step="any" value="${val(idea ? idea.cost : pv('cost', null))}" placeholder="0"></div>
          <div><label style="font-size:14px;color:var(--muted)">Hours</label>
-           <input type="number" id="f-duration" inputmode="decimal" min="0" step="any" value="${val(idea && idea.duration)}" placeholder="2"></div>
+           <input type="number" id="f-duration" inputmode="decimal" min="0" step="any" value="${val(idea ? idea.duration : pv('duration', null))}" placeholder="2"></div>
          <div><label style="font-size:14px;color:var(--muted)">Miles away</label>
            <input type="number" id="f-distance" inputmode="decimal" min="0" step="any" value="${val(idea && idea.distance)}" placeholder="10"></div>
        </div>
 
        <div class="field seasons"><label>Best seasons (leave empty for any time)</label>
-         ${SEASONS.map((s) => `<label><input type="checkbox" name="season" value="${s}" ${idea && idea.seasons.includes(s) ? 'checked' : ''}>${s}</label>`).join('')}
+         ${SEASONS.map((s) => `<label><input type="checkbox" name="season" value="${s}" ${(idea ? idea.seasons : pv('seasons', [])).includes(s) ? 'checked' : ''}>${s}</label>`).join('')}
        </div>
 
        <div class="field"><label>Tags (separate with commas)</label>
-         <input type="text" id="f-tags" value="${esc(idea ? idea.tags.join(', ') : '')}" placeholder="rainy day, outdoors, cozy" autocapitalize="none"></div>
+         <input type="text" id="f-tags" value="${esc(idea ? idea.tags.join(', ') : pv('tags', []).join(', '))}" placeholder="rainy day, outdoors, cozy" autocapitalize="none"></div>
 
        <div class="field"><label>Description</label>
-         <textarea id="f-description">${esc(idea ? idea.description : '')}</textarea></div>
+         <textarea id="f-description">${esc(idea ? idea.description : pv('description'))}</textarea></div>
 
        <div class="field"><label>Notes</label>
          <textarea id="f-notes">${esc(idea ? idea.notes : '')}</textarea></div>
@@ -1006,10 +1011,16 @@ function showForm(id) {
          <div id="clList">${(idea ? idea.checklist : []).map((c) => clRow(c.text, c.done)).join('')}</div>
          <button type="button" class="btn ghost" style="margin-top:0" data-act="addrow">+ Add item</button></div>
 
+       ${src ? `<label class="keep"><input type="checkbox" id="f-keeplink" ${idea ? 'checked' : ''}> <span><b>Keep source link</b><br><span class="hint" style="margin:0;word-break:break-all">${esc(src)}<br>${esc(LINK_WARNING)}</span></span></label>` : ''}
+
        <div class="error" id="formError"></div>
      </div>`,
     {
-      cancel: () => (idea ? showDetail(id) : closeSheet()),
+      import: () => showImport(),
+      cancel: () => {
+        if (pf) Object.keys(pf).forEach((k) => delete pf[k]); // forget the import guess
+        idea ? showDetail(id) : closeSheet();
+      },
       rmphoto: () => {
         image = '';
         newBlob = null;
@@ -1055,6 +1066,9 @@ function showForm(id) {
               .map((r) => ({ text: $('input', r).value.trim(), done: r.dataset.done === '1' }))
               .filter((c) => c.text),
           };
+          // The link is kept only if "Keep source link" is ticked.
+          const keepBox = $('#f-keeplink');
+          if (keepBox) data.sourceLink = keepBox.checked ? src : '';
           const item = idea || { id: uid(), createdAt: Date.now(), done: false, doneDate: null, donePhoto: '' };
           const oldImage = idea ? idea.image : '';
           const snap = JSON.parse(JSON.stringify(item));
@@ -1077,6 +1091,7 @@ function showForm(id) {
           }
           if (oldImage && oldImage !== item.image) removePhotos([oldImage]);
           if (!idea) ideas.push(item);
+          if (pf) Object.keys(pf).forEach((k) => delete pf[k]); // forget the import guess
           renderList();
           idea ? showDetail(item.id) : closeSheet();
         }),
@@ -1278,6 +1293,59 @@ function showFilters() {
     $('#showBtn').textContent = countText();
   });
 }
+
+// ---------- "Pick one for us" ----------
+let lastPick = null;
+function pickPool() {
+  // Looks at ideas still to do, using your Filter choices. Search words and tabs don't matter here.
+  const saveTab = tab, saveQ = query;
+  tab = 'todo';
+  query = '';
+  const pool = visibleIdeas();
+  tab = saveTab;
+  query = saveQ;
+  return pool;
+}
+function showPick(again) {
+  const pool = pickPool();
+  const choices = pool.length > 1 ? pool.filter((i) => i.id !== lastPick) : pool;
+  const i = choices[Math.floor(Math.random() * choices.length)];
+  lastPick = i ? i.id : null;
+  const u = i && photoUrl(i.image);
+  openSheet(
+    `<div class="sheet-head">
+       <button class="link" data-act="close">Close</button>
+       <strong>Pick one for us</strong>
+       <span></span>
+     </div>
+     <div class="sheet-body">
+       ${
+         i
+           ? `<div class="card ${colorOf(i.id)} pickcard" data-id="${esc(i.id)}">
+                <div class="card-top"><div class="card-body">
+                  <div class="card-title" style="font-size:28px">${esc(i.title)}</div>
+                  ${i.address ? `<div class="card-sub">${esc(i.address)}</div>` : ''}</div>
+                  ${u ? `<img class="thumb" src="${esc(u)}" alt="">` : `<div class="thumb">${miniHeart()}</div>`}</div>
+                <div>${chipsHtml(i)}</div></div>
+              <button class="btn" data-act="pickopen">Open this date</button>
+              <button class="btn ghost" data-act="pickagain">🎲 Pick another</button>
+              <p class="hint">${pool.length} idea${pool.length === 1 ? '' : 's'} to choose from${Object.values(filters).some((v) => v !== '') ? ' with your filters' : ''}.</p>`
+           : `<div class="empty">${mascot('empty', 120)}<b>Nothing to pick</b>${ideas.some((x) => !x.done) ? 'Your filters hide every idea. Change or reset them.' : 'Add an idea first, or move one back to To do.'}</div>`
+       }
+     </div>`,
+    {
+      close: closeSheet,
+      pickopen: () => showDetail(i.id),
+      pickagain: () => showPick(true),
+    }
+  );
+}
+$('#list').addEventListener('click', (e) => {
+  if (e.target.closest('[data-pick]')) {
+    e.stopPropagation();
+    showPick();
+  }
+}, true);
 
 // A short "yay!" screen when a date is marked done. Tap it or wait to close it.
 function celebrate() {
