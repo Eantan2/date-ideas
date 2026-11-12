@@ -46,11 +46,25 @@ function currentSeason() {
   return 'Winter';
 }
 
+// ---------- surprises ----------
+// A surprise idea is hidden from the other person until its reveal date (in this app).
+// It's hidden by the app, not locked away: it's still stored in the shared database.
+function todayStr() {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+}
+function hiddenSurprise(i) {
+  return !!(i.surprise && i.surprise.by && user && i.surprise.by !== user.id && todayStr() < i.surprise.date);
+}
+function myIdeas() {
+  return ideas.filter((i) => !hiddenSurprise(i));
+}
+
 function normalize(i) {
   return {
     title: '', image: '', address: '', cost: null, duration: null, distance: null,
     seasons: [], tags: [], description: '', notes: '', checklist: [],
-    done: false, doneDate: null, donePhoto: '', createdAt: Date.now(),
+    done: false, doneDate: null, donePhoto: '', createdAt: Date.now(), surprise: null,
     ...i,
   };
 }
@@ -454,7 +468,7 @@ async function urlToDataUrl(url) {
 
 async function exportBackup() {
   const out = { app: 'date-ideas', version: 1, exportedAt: new Date().toISOString(), ideas: [], recipes, feedback: Object.values(feedback).flat() };
-  for (const i of ideas) {
+  for (const i of myIdeas()) {
     const c = JSON.parse(JSON.stringify(i));
     for (const key of ['image', 'donePhoto']) {
       if (c[key]) c[key] = await urlToDataUrl(photoUrl(c[key]));
@@ -625,7 +639,7 @@ const SORTERS = {
 function visibleIdeas() {
   const f = filters;
   const season = f.season === 'now' ? currentSeason() : f.season;
-  return ideas
+  return myIdeas()
     .filter((i) => {
       if (tab === 'todo' && i.done) return false;
       if (tab === 'done' && !i.done) return false;
@@ -648,6 +662,13 @@ function visibleRecipes() {
   return recipes
     .filter((r) => !query || [r.title, r.ingredients, r.instructions, r.notes].join(' ').toLowerCase().includes(query))
     .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function giftChip(i) {
+  if (!i.surprise) return '';
+  const mineIt = user && i.surprise.by === user.id;
+  if (todayStr() < i.surprise.date) return mineIt ? `<span class="chip gift">🎁 Surprise · reveals ${esc(fmtDate(new Date(i.surprise.date + 'T12:00:00').getTime()))}</span>` : '';
+  return '<span class="chip gift">🎁 Surprise!</span>';
 }
 
 function chipsHtml(i) {
@@ -683,7 +704,7 @@ function cardHtml(i) {
       </div>
       ${thumb}
     </div>
-    <div>${done}${reactionChip(i.id)}${chipsHtml(i)}</div>
+    <div>${giftChip(i)}${done}${reactionChip(i.id)}${chipsHtml(i)}</div>
   </div>`;
 }
 
@@ -700,7 +721,10 @@ function recipeCardHtml(r) {
 
 const SETUP_HINT = `Recipes and feedback need one more setup step.<br>Run <b>supabase-update.sql</b> in Supabase.`;
 
+let animateNext = true; // cards slide in after a tab, a view change, or the first load
+let wasLoaded = false;
 function renderList() {
+  if (loaded && !wasLoaded) { wasLoaded = true; animateNext = true; }
   const isRecipes = view === 'recipes';
   $('#tabs').classList.toggle('hidden', isRecipes);
   $('#filterBtn').classList.toggle('hidden', isRecipes);
@@ -718,21 +742,81 @@ function renderList() {
     else html = emptyBox('empty', 'No recipes yet', 'Tap the + button to add one.');
   } else {
     const list = visibleIdeas();
-    const todo = ideas.filter((x) => !x.done).length;
-    const welcome = `<div class="welcome">${mascot('wave', 84)}<div><b>${ideas.length ? `${todo} date${todo === 1 ? '' : 's'} to try` : 'Hi, you two!'}</b><span>${ideas.length ? 'Pick one and go!' : 'Let’s plan something fun.'}</span>${todo ? '<button class="pick" data-pick>🎲 Pick one for us</button>' : ''}</div></div>`;
+    const mine = myIdeas();
+    const todo = mine.filter((x) => !x.done).length;
+    const doneN = mine.filter((x) => x.done).length;
+    const hour = new Date().getHours();
+    let mood = 'wave', hello = mine.length ? 'Pick one and go!' : 'Let’s plan something fun.';
+    if (hour >= 22 || hour < 5) { mood = 'sleepy'; hello = 'Late-night planning? Sweet dreams soon.'; }
+    else if (doneN > 0 && doneN % 10 === 0) { mood = 'party'; hello = `${doneN} dates done together! 🎉`; }
+    const welcome = `<div class="welcome">${mascot(mood, 84)}<div><b>${mine.length ? `${todo} date${todo === 1 ? '' : 's'} to try` : 'Hi, you two!'}</b><span>${hello}</span>${todo ? '<button class="pick" data-pick>🎲 Pick one for us</button>' : ''}</div></div>`;
     if (list.length) html = welcome + list.map(cardHtml).join('');
-    else if (ideas.length === 0) html = emptyBox('empty', 'No ideas yet', 'Tap the + button to add your first one.');
+    else if (mine.length === 0) html = emptyBox('empty', 'No ideas yet', 'Tap the + button to add your first one.');
     else html = welcome + emptyBox('empty', 'Nothing matches here', 'Try another tab, search, or reset your filters.');
   }
   $('#list').innerHTML = html;
+  $('#list').classList.toggle('enter', animateNext);
+  animateNext = false;
   const n = Object.values(filters).filter((v) => v !== '').length;
   $('#filterBtn').textContent = n ? `Filter (${n})` : 'Filter';
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
 }
 
+// ---------- dark mode ----------
+const THEME_NAMES = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+function themePref() {
+  try { return localStorage.getItem('theme') || 'auto'; } catch (e) { return 'auto'; }
+}
+function applyTheme() {
+  const t = themePref();
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+  const dark = t === 'dark' || (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+  const m = document.querySelector('meta[name=theme-color]');
+  if (m) m.content = dark ? '#231815' : '#FBF1E8';
+}
+function cycleTheme() {
+  const next = { auto: 'light', light: 'dark', dark: 'auto' }[themePref()];
+  try { localStorage.setItem('theme', next); } catch (e) { /* just not remembered */ }
+  applyTheme();
+  renderFoot();
+}
+applyTheme();
+
+// The anniversary is saved on this device only (so set it on each phone).
+function showAnniversary() {
+  let cur = '';
+  try { cur = localStorage.getItem('anniv') || ''; } catch (e) { /* none */ }
+  openSheet(
+    `<div class="sheet-head"><button class="link" data-act="close">Cancel</button><strong>Our anniversary</strong><button class="link strong" data-act="saveanniv">Save</button></div>
+     <div class="sheet-body">
+       <div style="text-align:center">${mascot('wave', 110, 'crown')}</div>
+       <div class="field"><label>The day you got together</label><input type="date" id="anniv" value="${esc(cur)}"></div>
+       <p class="hint">On this day each year, the heart wears a crown. It's saved on this phone only, so set it on both phones.</p>
+       <button class="btn ghost" data-act="clearanniv">Clear it</button>
+     </div>`,
+    {
+      close: closeSheet,
+      saveanniv: () => {
+        const v = $('#anniv').value;
+        try { v ? localStorage.setItem('anniv', v) : localStorage.removeItem('anniv'); } catch (e) { /* not saved */ }
+        closeSheet();
+        renderList();
+        toast(v ? 'Saved.' : 'Cleared.');
+      },
+      clearanniv: () => {
+        try { localStorage.removeItem('anniv'); } catch (e) { /* none */ }
+        closeSheet();
+        renderList();
+        toast('Cleared.');
+      },
+    }
+  );
+}
+
 function renderFoot() {
   $('#foot').innerHTML = user
-    ? `Signed in as ${esc(user.email)}<br><button class="link" data-backup>Backup &amp; restore</button> · <button class="link" data-signout>Sign out</button>`
+    ? `Signed in as ${esc(user.email)}<br><button class="link" data-look>Look: ${THEME_NAMES[themePref()]}</button> · <button class="link" data-anniv>Anniversary</button><br><button class="link" data-backup>Backup &amp; restore</button> · <button class="link" data-signout>Sign out</button>`
     : '';
 }
 
@@ -765,6 +849,12 @@ $('#sheet').addEventListener('click', (e) => {
 });
 
 // ---------- idea detail screen ----------
+// Shown when two different people both gave this idea a 👍.
+function bothLoveHtml(id) {
+  const ups = new Set((feedback[id] || []).filter((r) => r.reaction === 'up').map((r) => r.user_id));
+  return ups.size >= 2 ? `<div class="love-banner">${mascot('love', 64)}<span>You both love this one!</span></div>` : '';
+}
+
 function feedbackHtml(i) {
   if (!featuresReady) return `<div class="sec">How we feel</div><p class="hint">${SETUP_HINT}</p>`;
   const rows = feedback[i.id] || [];
@@ -774,6 +864,7 @@ function feedbackHtml(i) {
     .map((r) => `<div class="fb"><b>${esc(niceName(r.author))}</b> ${REACT[r.reaction] || ''}${r.comment ? `<p class="pre">${esc(r.comment)}</p>` : ''}</div>`)
     .join('');
   return `<div class="sec">How we feel</div>
+    <div id="bothLove">${bothLoveHtml(i.id)}</div>
     ${others}
     <div class="react">${['up', 'meh', 'down'].map((k) => `<button type="button" class="rbtn ${mine.reaction === k ? 'on' : ''}" data-act="react" data-r="${k}" aria-label="${k}">${REACT[k]}</button>`).join('')}</div>
     <div class="field" style="margin-top:10px"><textarea id="fbComment" placeholder="Add a comment (optional)">${esc(mine.comment)}</textarea></div>
@@ -784,11 +875,13 @@ function feedbackHtml(i) {
 function syncReactions(id) {
   const mine = (feedback[id] || []).find((r) => r.user_id === user.id);
   $$('.rbtn', $('#sheetInner')).forEach((b) => b.classList.toggle('on', !!mine && mine.reaction === b.dataset.r));
+  const bl = $('#bothLove');
+  if (bl) bl.innerHTML = bothLoveHtml(id);
 }
 
 function showDetail(id) {
   const i = ideas.find((x) => x.id === id);
-  if (!i) return closeSheet();
+  if (!i || hiddenSurprise(i)) return closeSheet();
 
   const checklist = i.checklist.length
     ? `<div class="sec">Checklist</div>` +
@@ -819,7 +912,7 @@ function showDetail(id) {
      <div class="sheet-body">
        ${heroUrl ? `<img class="hero" src="${esc(heroUrl)}" alt="">` : ''}
        <h2 class="detail-title">${esc(i.title)}</h2>
-       <div>${chipsHtml(i)}</div>
+       <div>${giftChip(i)}${chipsHtml(i)}</div>
        ${i.address ? `<div class="sec">Where</div><p class="pre">${esc(i.address)}</p>` : ''}
        ${i.description ? `<div class="sec">About</div><p class="pre">${esc(i.description)}</p>` : ''}
        ${i.notes ? `<div class="sec">Notes</div><p class="pre">${esc(i.notes)}</p>` : ''}
@@ -842,7 +935,11 @@ function showDetail(id) {
           return toast(errText('save', e), true);
         }
         renderList();
-        if (sheetToken === token) syncReactions(id); // only if this same screen is still open
+        if (sheetToken === token) {
+          syncReactions(id); // only if this same screen is still open
+          const on = $(`.rbtn[data-r="${k}"].on`, $('#sheetInner'));
+          if (on) { on.classList.remove('pop'); void on.offsetWidth; on.classList.add('pop'); }
+        }
       },
       savecomment: (b) =>
         busy(b, 'Saving…', async () => {
@@ -1007,6 +1104,12 @@ function showForm(id, prefill) {
        <div class="field"><label>Notes</label>
          <textarea id="f-notes">${esc(idea ? idea.notes : '')}</textarea></div>
 
+       ${!idea || !idea.surprise || idea.surprise.by === (user && user.id) ? `<div class="surprise-box">
+         <label style="display:flex;align-items:center;gap:10px;color:var(--text);font-size:16px;margin:0"><input type="checkbox" id="f-surprise" ${idea && idea.surprise ? 'checked' : ''}> <span><b>🎁 Make it a surprise</b><br><span class="hint" style="margin:0">Hidden from your partner in the app until the day you pick.</span></span></label>
+         <div id="surpriseDate" class="${idea && idea.surprise ? '' : 'hidden'}" style="margin-top:10px"><label style="font-size:14px;color:var(--muted)">Reveal on</label>
+           <input type="date" id="f-sdate" value="${esc(idea && idea.surprise ? idea.surprise.date : '')}" min="${todayStr()}"></div>
+       </div>` : ''}
+
        <div class="field"><label>Checklist</label>
          <div id="clList">${(idea ? idea.checklist : []).map((c) => clRow(c.text, c.done)).join('')}</div>
          <button type="button" class="btn ghost" style="margin-top:0" data-act="addrow">+ Add item</button></div>
@@ -1066,6 +1169,13 @@ function showForm(id, prefill) {
               .map((r) => ({ text: $('input', r).value.trim(), done: r.dataset.done === '1' }))
               .filter((c) => c.text),
           };
+          const sBox = $('#f-surprise');
+          if (sBox) {
+            const sd = $('#f-sdate').value;
+            if (sBox.checked && !sd) return (err.textContent = 'Pick the day to reveal your surprise.');
+            if (sBox.checked && !idea && sd < todayStr()) return (err.textContent = 'The reveal day should be today or later.');
+            data.surprise = sBox.checked ? { by: idea && idea.surprise ? idea.surprise.by : user.id, date: sd } : null;
+          }
           // The link is kept only if "Keep source link" is ticked.
           const keepBox = $('#f-keeplink');
           if (keepBox) data.sourceLink = keepBox.checked ? src : '';
@@ -1097,6 +1207,9 @@ function showForm(id, prefill) {
         }),
     }
   );
+
+  const sb0 = $('#f-surprise');
+  if (sb0) sb0.addEventListener('change', () => $('#surpriseDate').classList.toggle('hidden', !sb0.checked));
 
   $('#photoInput').addEventListener('change', async (e) => {
     const f = e.target.files[0];
@@ -1239,7 +1352,7 @@ function showRecipeForm(id) {
 function showFilters() {
   const opt = (v, label, cur) => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(label)}</option>`;
   const f = filters;
-  const allTags = [...new Set(ideas.flatMap((i) => i.tags))].sort();
+  const allTags = [...new Set(myIdeas().flatMap((i) => i.tags))].sort();
   const countText = () => `Show ${visibleIdeas().length} idea${visibleIdeas().length === 1 ? '' : 's'}`;
 
   openSheet(
@@ -1330,7 +1443,7 @@ function showPick(again) {
               <button class="btn" data-act="pickopen">Open this date</button>
               <button class="btn ghost" data-act="pickagain">🎲 Pick another</button>
               <p class="hint">${pool.length} idea${pool.length === 1 ? '' : 's'} to choose from${Object.values(filters).some((v) => v !== '') ? ' with your filters' : ''}.</p>`
-           : `<div class="empty">${mascot('empty', 120)}<b>Nothing to pick</b>${ideas.some((x) => !x.done) ? 'Your filters hide every idea. Change or reset them.' : 'Add an idea first, or move one back to To do.'}</div>`
+           : `<div class="empty">${mascot('empty', 120)}<b>Nothing to pick</b>${myIdeas().some((x) => !x.done) ? 'Your filters hide every idea. Change or reset them.' : 'Add an idea first, or move one back to To do.'}</div>`
        }
      </div>`,
     {
@@ -1404,6 +1517,8 @@ function showLogin(msg = '') {
 }
 
 $('#foot').addEventListener('click', async (e) => {
+  if (e.target.closest("[data-look]")) return cycleTheme();
+  if (e.target.closest('[data-anniv]')) return showAnniversary();
   if (e.target.closest('[data-backup]')) return showBackup();
   if (!e.target.closest('[data-signout]')) return;
   try {
@@ -1440,12 +1555,14 @@ $('#tabs').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   tab = b.dataset.tab;
+  animateNext = true;
   renderList();
 });
 $('#nav').addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   view = b.dataset.view;
+  animateNext = true;
   renderList();
   window.scrollTo(0, 0);
 });
