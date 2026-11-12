@@ -238,9 +238,12 @@ async function loadIdeas() {
     sb.from('recipes').select('id,data'),
     sb.from('feedback').select('idea_id,user_id,author,reaction,comment,updated_at'),
   ]);
-  const bad = rc.error || fb.error;
-  if (bad && /failed to fetch|network|load failed/i.test(bad.message || '')) throw bad;
-  featuresReady = !bad;
+  // Only a missing table means "setup not done". Any other error (no permission, server trouble,
+  // no internet) is a real problem, so it goes to the normal error banner.
+  const problems = [rc.error, fb.error].filter(Boolean);
+  const realProblem = problems.find((e) => !isMissingTable(e));
+  if (realProblem) throw realProblem;
+  featuresReady = problems.length === 0;
   recipes = featuresReady ? (rc.data || []).map((r) => normalizeRecipe({ ...r.data, id: r.id })) : [];
   feedback = {};
   if (featuresReady) (fb.data || []).forEach((r) => (feedback[r.idea_id] = feedback[r.idea_id] || []).push(r));
@@ -259,21 +262,38 @@ async function saveRow(table, obj) {
 const saveIdea = (i) => saveRow('ideas', i);
 const saveRecipe = (r) => saveRow('recipes', r);
 
-async function saveFeedback(ideaId, patch) {
-  const list = feedback[ideaId] || [];
-  const mine = list.find((r) => r.user_id === user.id) || { reaction: null, comment: '' };
-  const row = {
-    idea_id: ideaId,
-    user_id: user.id,
-    author: user.email,
-    reaction: mine.reaction,
-    comment: mine.comment,
-    ...patch,
-    updated_at: new Date().toISOString(),
+// True when the error means "this table doesn't exist yet" (supabase-update.sql not run).
+function isMissingTable(e) {
+  const m = (e && e.message) || '';
+  return (e && (e.code === 'PGRST205' || e.code === '42P01')) || /could not find the table|relation .* does not exist/i.test(m);
+}
+
+// Saves my reaction and/or comment on an idea. Saves for the same idea wait in line, one at a time,
+// and each one builds its row from the latest saved values. That way a comment save can never
+// write an old reaction back over a newer one. `patch` is an object, or a function that gets my
+// latest row and returns the object (used for the toggle-a-reaction click).
+const feedbackQueue = {};
+function saveFeedback(ideaId, patch) {
+  const run = async () => {
+    const mine = (feedback[ideaId] || []).find((r) => r.user_id === user.id) || { reaction: null, comment: '' };
+    const change = typeof patch === 'function' ? patch(mine) : patch;
+    const row = {
+      idea_id: ideaId,
+      user_id: user.id,
+      author: user.email,
+      reaction: mine.reaction,
+      comment: mine.comment,
+      ...change,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await sb.from('feedback').upsert(row, { onConflict: 'idea_id,user_id' });
+    if (error) throw error;
+    feedback[ideaId] = (feedback[ideaId] || []).filter((r) => r.user_id !== user.id).concat(row);
   };
-  const { error } = await sb.from('feedback').upsert(row, { onConflict: 'idea_id,user_id' });
-  if (error) throw error;
-  feedback[ideaId] = list.filter((r) => r.user_id !== user.id).concat(row);
+  // A failed save must not block the ones behind it.
+  const next = (feedbackQueue[ideaId] || Promise.resolve()).catch(() => {}).then(run);
+  feedbackQueue[ideaId] = next;
+  return next;
 }
 
 async function uploadPhoto(ideaId, blob) {
@@ -311,10 +331,12 @@ async function refresh() {
     await loadIdeas();
     setBanner('');
     renderList();
+    return true;
   } catch (e) {
     if (!loaded) loadFailed = true;
     setBanner(errText('load your ideas', e), refresh);
     renderList();
+    return false;
   } finally {
     btn.disabled = false;
   }
@@ -476,7 +498,7 @@ function showBackup() {
        <p class="hint" style="margin-top:0">Saves all your ideas (with photos) and recipes in one file. Keep it somewhere safe, like Files or your computer.</p>
        <button class="btn" data-act="export">Download backup</button>
        <div class="sec">Restore</div>
-       <p class="hint" style="margin-top:0">Adds ideas and recipes from a backup file. Anything already here is left alone.</p>
+       <p class="hint" style="margin-top:0">Adds ideas, recipes and your own feedback from a backup file. Anything already here is left alone.</p>
        <div class="field"><input type="file" id="restoreFile" accept=".json,application/json"></div>
        <button class="btn ghost" data-act="restore">Restore from file</button>
        <p class="hint" id="backupMsg"></p>
@@ -503,10 +525,18 @@ function showBackup() {
             return say("That file isn't a valid backup.", true);
           }
           if (!data || data.app !== 'date-ideas' || !Array.isArray(data.ideas)) return say("That file isn't a Date Ideas backup.", true);
+          const backupRecipes = Array.isArray(data.recipes) ? data.recipes.filter(Boolean) : [];
+          // The database lets each person change only their own feedback, so I can only
+          // bring back my own. Other people's entries stay in the file but are not restored here.
+          const backupFeedback = Array.isArray(data.feedback) ? data.feedback.filter(Boolean) : [];
+          const myFeedback = backupFeedback.filter((r) => r.user_id === user.id);
+          const othersFeedback = backupFeedback.length - myFeedback.length;
           let added = 0;
           let skipped = 0;
           let failed = 0;
           let lastErr = null;
+          let needRecipes = 0; // not restored because supabase-update.sql has not been run
+          let needFeedback = 0;
           for (const old of data.ideas) {
             if (ideas.some((x) => x.id === old.id)) {
               skipped++;
@@ -521,7 +551,7 @@ function showBackup() {
             }
           }
           if (featuresReady) {
-            for (const r of data.recipes || []) {
+            for (const r of backupRecipes) {
               if (recipes.some((x) => x.id === r.id)) {
                 skipped++;
                 continue;
@@ -534,9 +564,49 @@ function showBackup() {
                 lastErr = e;
               }
             }
+          } else {
+            needRecipes = backupRecipes.length;
           }
-          await refresh();
-          say(`Added ${added}, skipped ${skipped} already here` + (failed ? `, ${failed} failed. ${errText('restore', lastErr)}` : '.'), failed > 0);
+          // Reload first, so feedback is matched against the ideas and feedback that really exist now.
+          const fresh = await refresh();
+          if (myFeedback.length && !featuresReady) {
+            needFeedback = myFeedback.length;
+          } else if (myFeedback.length && !fresh) {
+            failed += myFeedback.length;
+            lastErr = lastErr || new Error('Could not reload your ideas.');
+          } else {
+            for (const r of myFeedback) {
+              if (!ideas.some((x) => x.id === r.idea_id)) {
+                failed++;
+                lastErr = new Error("an idea that some feedback belongs to isn't here");
+                continue;
+              }
+              if ((feedback[r.idea_id] || []).some((x) => x.user_id === user.id)) {
+                skipped++;
+                continue;
+              }
+              try {
+                await saveFeedback(r.idea_id, { reaction: REACT[r.reaction] ? r.reaction : null, comment: typeof r.comment === 'string' ? r.comment : '' });
+                added++;
+              } catch (e) {
+                failed++;
+                lastErr = e;
+              }
+            }
+            renderList();
+          }
+
+          const end = (s) => (/[.!?]$/.test(s) ? s : s + '.');
+          const notes = [];
+          if (othersFeedback) notes.push(`${othersFeedback} feedback ${othersFeedback === 1 ? 'entry' : 'entries'} from other people can't be restored here, because each person can only restore their own`);
+          if (needRecipes || needFeedback) {
+            const what = [];
+            if (needRecipes) what.push(`${needRecipes} recipe${needRecipes === 1 ? '' : 's'}`);
+            if (needFeedback) what.push(`${needFeedback} feedback ${needFeedback === 1 ? 'entry' : 'entries'}`);
+            notes.push(`${what.join(' and ')} not restored, because recipes and feedback need one more setup step. Run supabase-update.sql in Supabase, then restore this file again`);
+          }
+          if (failed) notes.push(`${failed} failed. ${errText('restore', lastErr)}`);
+          say([`Added ${added}, skipped ${skipped} already here`, ...notes].map(end).join(' '), failed > 0 || needRecipes > 0 || needFeedback > 0);
         }),
     }
   );
@@ -652,7 +722,11 @@ function renderFoot() {
 }
 
 // ---------- panel (full-screen sheet) ----------
+// Changes every time the open panel changes. A slow save checks it when it finishes, so it
+// never draws over a different screen (like an edit form) that you opened while it was saving.
+let sheetToken = 0;
 function openSheet(html, acts, keepScroll = false) {
+  sheetToken++;
   const inner = $('#sheetInner');
   const prev = $('.sheet-body', inner);
   const top = keepScroll && prev ? prev.scrollTop : 0;
@@ -664,6 +738,7 @@ function openSheet(html, acts, keepScroll = false) {
   if (body) body.scrollTop = top;
 }
 function closeSheet() {
+  sheetToken++;
   $('#sheet').classList.add('hidden');
   $('#sheetInner').innerHTML = '';
   document.body.classList.remove('lock');
@@ -690,7 +765,13 @@ function feedbackHtml(i) {
     <button class="btn ghost" style="margin-top:0" data-act="savecomment">Save comment</button>`;
 }
 
-function showDetail(id, keepScroll = false) {
+// Shows my reaction as selected, without redrawing the screen (so nothing typed is lost).
+function syncReactions(id) {
+  const mine = (feedback[id] || []).find((r) => r.user_id === user.id);
+  $$('.rbtn', $('#sheetInner')).forEach((b) => b.classList.toggle('on', !!mine && mine.reaction === b.dataset.r));
+}
+
+function showDetail(id) {
   const i = ideas.find((x) => x.id === id);
   if (!i) return closeSheet();
 
@@ -737,15 +818,15 @@ function showDetail(id, keepScroll = false) {
       edit: () => showForm(id),
       react: async (b) => {
         const k = b.dataset.r;
-        const mine = (feedback[id] || []).find((r) => r.user_id === user.id);
-        const next = mine && mine.reaction === k ? null : k;
+        const token = sheetToken;
         try {
-          await saveFeedback(id, { reaction: next, comment: $('#fbComment').value.trim() });
+          // Only the reaction changes here. The comment has its own Save comment button.
+          await saveFeedback(id, (mine) => ({ reaction: mine.reaction === k ? null : k }));
         } catch (e) {
           return toast(errText('save', e), true);
         }
         renderList();
-        showDetail(id, true);
+        if (sheetToken === token) syncReactions(id); // only if this same screen is still open
       },
       savecomment: (b) =>
         busy(b, 'Saving…', async () => {
@@ -758,6 +839,7 @@ function showDetail(id, keepScroll = false) {
         }),
       complete: (b) =>
         busy(b, 'Saving…', async () => {
+          const token = sheetToken;
           let path = null;
           try {
             const f = $('#donePhoto').files[0];
@@ -774,10 +856,11 @@ function showDetail(id, keepScroll = false) {
             return toast(errText('save', e), true);
           }
           renderList();
-          showDetail(id);
+          if (sheetToken === token) showDetail(id);
         }),
       undo: (b) =>
         busy(b, 'Saving…', async () => {
+          const token = sheetToken;
           try {
             await update(i, () => {
               i.done = false;
@@ -786,7 +869,7 @@ function showDetail(id, keepScroll = false) {
             return toast(errText('save', e), true);
           }
           renderList();
-          showDetail(id);
+          if (sheetToken === token) showDetail(id);
         }),
       del: async (b) => {
         if (!confirm('Delete this idea?')) return;
@@ -804,9 +887,9 @@ function showDetail(id, keepScroll = false) {
         renderList();
         closeSheet();
       },
-    },
-    keepScroll
+    }
   );
+  const detailToken = sheetToken; // identifies this screen, for the slow saves below
 
   // tick checklist items
   $$('.check input', $('#sheetInner')).forEach((cb) =>
@@ -838,7 +921,7 @@ function showDetail(id, keepScroll = false) {
           i.donePhoto = path;
         });
         removePhotos([old]);
-        showDetail(id);
+        if (sheetToken === detailToken) showDetail(id);
       } catch (err) {
         if (path) removePhotos([path]);
         toast(errText('save the photo', err), true);
