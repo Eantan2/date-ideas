@@ -4,15 +4,21 @@
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter'];
 const BUCKET = 'photos';
 const URL_TTL = 3600; // photo links last 1 hour, then we ask for fresh ones
+const REACT = { up: '👍', meh: '😐', down: '👎' };
 let sb = null; // Supabase client
 let user = null;
 let ideas = [];
+let recipes = [];
+let feedback = {}; // idea id -> list of feedback rows
+let featuresReady = true; // false until supabase-update.sql has been run
 let loaded = false;
 let loadFailed = false;
 let lastLoad = 0;
 let urlMap = {}; // photo path -> temporary link
+let view = 'ideas'; // 'ideas' or 'recipes'
 let tab = 'todo';
-let filters = { cost: '', duration: '', distance: '', season: '' };
+let query = '';
+let filters = { cost: '', duration: '', distance: '', season: '', tag: '', sort: '' };
 let actions = {}; // button handlers for whichever panel is open
 
 // ---------- small helpers ----------
@@ -25,7 +31,12 @@ const fmtCost = (c) => (c == null ? '' : c === 0 ? 'Free' : '$' + (Number.isInte
 const fmtDur = (h) => (h == null ? '' : h < 1 ? Math.round(h * 60) + ' min' : Math.round(h * 100) / 100 + ' hr');
 const fmtDist = (m) => (m == null ? '' : Math.round(m * 10) / 10 + ' mi');
 const fmtDate = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+const fmtNum = (n) => String(Math.round(n * 100) / 100);
 const photoUrl = (p) => (p && urlMap[p]) || '';
+const niceName = (a) => {
+  const n = String(a || '').split('@')[0];
+  return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Partner';
+};
 
 function currentSeason() {
   const m = new Date().getMonth(); // 0 = Jan
@@ -38,10 +49,13 @@ function currentSeason() {
 function normalize(i) {
   return {
     title: '', image: '', address: '', cost: null, duration: null, distance: null,
-    seasons: [], description: '', notes: '', checklist: [],
+    seasons: [], tags: [], description: '', notes: '', checklist: [],
     done: false, doneDate: null, donePhoto: '', createdAt: Date.now(),
     ...i,
   };
+}
+function normalizeRecipe(r) {
+  return { title: '', servings: null, ingredients: '', instructions: '', notes: '', source: '', createdAt: Date.now(), ...r };
 }
 
 // Shrinks a photo so it uploads fast. Gives back a JPEG file.
@@ -64,6 +78,98 @@ function resizeImage(file, max = 900) {
     };
     img.src = url;
   });
+}
+
+// ---------- recipes: turn amounts into grams ----------
+// Grams per US cup for common ingredients. These are estimates from common baking charts.
+// [what to look for, grams per cup, words that mean it is something else]
+const DENS = [
+  [/brown sugar/, 213],
+  [/(powdered|confectioners?'?s?|icing) sugar/, 120],
+  [/sugar/, 200, /snap|coconut|substitute/],
+  [/bread flour/, 127],
+  [/whole.?wheat flour/, 113],
+  [/flour/, 120, /almond|coconut|rice|corn|oat|chickpea|buckwheat|spelt|rye|potato|tapioca/],
+  [/butter/, 227, /peanut|almond|nut|cocoa|butter ?milk|shea/],
+  [/honey/, 340],
+  [/water/, 237, /coconut|rose|orange/],
+  [/milk/, 244, /condensed|evaporated|powder|butter ?milk/],
+  [/(heavy|whipping|double) cream/, 238],
+  [/\boil\b/, 218, /coconut|sesame|truffle|spray/],
+  [/cocoa/, 85, /butter|nibs/],
+  [/\boats\b/, 90, /steel/],
+  [/\brice\b/, 185, /cooked|flour|vinegar|noodle|krispies|cereal/],
+  [/chocolate chips?/, 170],
+  [/\bsalt\b/, 288, /kosher|flaky|sea|pepper/], // table salt: 6 g per teaspoon
+];
+function density(name) {
+  for (const [re, g, ex] of DENS) if (re.test(name) && !(ex && ex.test(name))) return g;
+  return null;
+}
+
+const FRAC = { '½': 0.5, '¼': 0.25, '¾': 0.75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': 0.125 };
+function parseNum(s) {
+  let m;
+  if ((m = s.match(/^(\d+)\s+(\d+)\/(\d+)/)) && +m[3] > 0) return { n: +m[1] + +m[2] / +m[3], len: m[0].length };
+  if ((m = s.match(/^(\d+)\s*([½¼¾⅓⅔⅛])/))) return { n: +m[1] + FRAC[m[2]], len: m[0].length };
+  if ((m = s.match(/^(\d+)\/(\d+)/)) && +m[2] > 0) return { n: +m[1] / +m[2], len: m[0].length };
+  if ((m = s.match(/^([½¼¾⅓⅔⅛])/))) return { n: FRAC[m[1]], len: 1 };
+  if ((m = s.match(/^(\d+\.\d+|\d+|\.\d+)/))) return { n: parseFloat(m[1]), len: m[0].length };
+  return null;
+}
+const UNITS = [
+  [/^(fl\.?\s*oz|fluid ounces?)\b\.?/i, 'floz'],
+  [/^(cups?)\b\.?/i, 'cup'],
+  [/^(tablespoons?|tbsps?|tbs|tbl)\b\.?/i, 'tbsp'],
+  [/^(teaspoons?|tsps?)\b\.?/i, 'tsp'],
+  [/^(ounces?|oz)\b\.?/i, 'oz'],
+  [/^(pounds?|lbs?)\b\.?/i, 'lb'],
+  [/^(kilograms?|kg)\b\.?/i, 'kg'],
+  [/^(grams?|g)\b\.?/i, 'g'],
+  [/^(milliliters?|millilitres?|ml)\b\.?/i, 'ml'],
+  [/^(liters?|litres?|l)\b\.?/i, 'l'],
+  [/^(sticks?)\b\.?/i, 'stick'],
+];
+function parseIngredient(line) {
+  const s = line.replace(/^[-•*]\s*/, '').trim();
+  const num = parseNum(s);
+  if (!num) return null;
+  const restAll = s.slice(num.len).trim();
+  if (/^[-–]\s*\d/.test(restAll)) return null; // ranges like "2-3 cups" are left alone
+  let rest = restAll;
+  let unit = null;
+  for (const [re, key] of UNITS) {
+    const m = rest.match(re);
+    if (m) {
+      unit = key;
+      rest = rest.slice(m[0].length).trim();
+      break;
+    }
+  }
+  return { qty: num.n, unit, restAll, name: rest.replace(/^of\s+/i, '') };
+}
+function toGrams(qty, unit, name) {
+  let g = null;
+  if (unit === 'oz') g = qty * 28.3495;
+  else if (unit === 'lb') g = qty * 453.592;
+  else if (unit === 'g' || unit === 'kg') g = null; // already metric
+  else if (unit) {
+    const cups = { cup: 1, tbsp: 1 / 16, tsp: 1 / 48, floz: 1 / 8, ml: 1 / 236.588, l: 1000 / 236.588, stick: 0.5 }[unit];
+    const d = density(name);
+    if (d && cups) g = qty * cups * d;
+  } else if (/^(large |medium |small )?eggs?\b/.test(name) && !/yolk|white/.test(name)) {
+    g = qty * 50;
+  }
+  if (g == null || !isFinite(g)) return null;
+  return g >= 10 ? Math.round(g) : Math.round(g * 10) / 10;
+}
+// Gives back the line to show (scaled if needed) and its estimated grams (or null).
+function convertLine(line, scale = 1) {
+  const p = parseIngredient(line);
+  if (!p) return { text: line, grams: null };
+  const qty = p.qty * scale;
+  const text = scale === 1 ? line : `${fmtNum(qty)} ${p.restAll}`;
+  return { text, grams: toGrams(qty, p.unit, p.name.toLowerCase()) };
 }
 
 // ---------- messages ----------
@@ -126,16 +232,48 @@ async function loadIdeas() {
       if (s.signedUrl) urlMap[s.path] = s.signedUrl;
     });
   }
+
+  // Recipes and feedback come from tables added later. If they are missing, the rest still works.
+  const [rc, fb] = await Promise.all([
+    sb.from('recipes').select('id,data'),
+    sb.from('feedback').select('idea_id,user_id,author,reaction,comment,updated_at'),
+  ]);
+  const bad = rc.error || fb.error;
+  if (bad && /failed to fetch|network|load failed/i.test(bad.message || '')) throw bad;
+  featuresReady = !bad;
+  recipes = featuresReady ? (rc.data || []).map((r) => normalizeRecipe({ ...r.data, id: r.id })) : [];
+  feedback = {};
+  if (featuresReady) (fb.data || []).forEach((r) => (feedback[r.idea_id] = feedback[r.idea_id] || []).push(r));
+
   ideas = list;
   loaded = true;
   loadFailed = false;
   lastLoad = Date.now();
 }
 
-async function saveIdea(i) {
-  const { id, ...rest } = i;
-  const { error } = await sb.from('ideas').upsert({ id, data: rest, updated_at: new Date().toISOString() });
+async function saveRow(table, obj) {
+  const { id, ...rest } = obj;
+  const { error } = await sb.from(table).upsert({ id, data: rest, updated_at: new Date().toISOString() });
   if (error) throw error;
+}
+const saveIdea = (i) => saveRow('ideas', i);
+const saveRecipe = (r) => saveRow('recipes', r);
+
+async function saveFeedback(ideaId, patch) {
+  const list = feedback[ideaId] || [];
+  const mine = list.find((r) => r.user_id === user.id) || { reaction: null, comment: '' };
+  const row = {
+    idea_id: ideaId,
+    user_id: user.id,
+    author: user.email,
+    reaction: mine.reaction,
+    comment: mine.comment,
+    ...patch,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await sb.from('feedback').upsert(row, { onConflict: 'idea_id,user_id' });
+  if (error) throw error;
+  feedback[ideaId] = list.filter((r) => r.user_id !== user.id).concat(row);
 }
 
 async function uploadPhoto(ideaId, blob) {
@@ -153,15 +291,15 @@ function removePhotos(paths) {
   if (p.length) sb.storage.from(BUCKET).remove(p).catch(() => {});
 }
 
-// Changes an idea and saves it. If saving fails, the change is undone.
-async function update(i, change) {
-  const snap = JSON.parse(JSON.stringify(i));
+// Changes something and saves it. If saving fails, the change is undone.
+async function update(obj, change, saver = saveIdea) {
+  const snap = JSON.parse(JSON.stringify(obj));
   change();
   try {
-    await saveIdea(i);
+    await saver(obj);
   } catch (e) {
-    Object.keys(i).forEach((k) => delete i[k]);
-    Object.assign(i, snap);
+    Object.keys(obj).forEach((k) => delete obj[k]);
+    Object.assign(obj, snap);
     throw e;
   }
 }
@@ -233,7 +371,8 @@ async function checkLocal() {
   el.classList.remove('hidden');
 }
 
-async function uploadLocalIdea(old) {
+// Adds an idea (from this device or a backup file). Photos given as data: links get uploaded.
+async function importIdea(old) {
   if (ideas.some((x) => x.id === old.id)) return; // already online
   const item = normalize({ ...old });
   const made = [];
@@ -264,7 +403,7 @@ $('#migrate').addEventListener('click', async (e) => {
   for (let n = 0; n < local.length; n++) {
     btn.textContent = `Uploading ${n + 1} of ${local.length}…`;
     try {
-      await uploadLocalIdea(local[n]);
+      await importIdea(local[n]);
       await deleteLocal(local[n].id);
       ok++;
     } catch (err) {
@@ -277,7 +416,142 @@ $('#migrate').addEventListener('click', async (e) => {
   toast(fail ? `${ok} uploaded, ${fail} failed. ${errText('upload', lastErr)}` : `Uploaded ${ok} idea${ok === 1 ? '' : 's'}.`, fail > 0);
 });
 
+// ---------- backup and restore ----------
+async function urlToDataUrl(url) {
+  if (!url) throw new Error('A photo could not be loaded. Tap refresh and try again.');
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('A photo could not be downloaded.');
+  const blob = await r.blob();
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function exportBackup() {
+  const out = { app: 'date-ideas', version: 1, exportedAt: new Date().toISOString(), ideas: [], recipes, feedback: Object.values(feedback).flat() };
+  for (const i of ideas) {
+    const c = JSON.parse(JSON.stringify(i));
+    for (const key of ['image', 'donePhoto']) {
+      if (c[key]) c[key] = await urlToDataUrl(photoUrl(c[key]));
+    }
+    out.ideas.push(c);
+  }
+  const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
+  const name = `date-ideas-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  const file = new File([blob], name, { type: 'application/json' });
+  // On an iPhone this opens the share sheet, where "Save to Files" works.
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: 'Date Ideas backup' });
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+function showBackup() {
+  const say = (t, bad = false) => {
+    const el = $('#backupMsg');
+    el.textContent = t;
+    el.style.color = bad ? '#c0392b' : 'var(--muted)';
+  };
+  openSheet(
+    `<div class="sheet-head">
+       <button class="link" data-act="close">‹ Back</button>
+       <strong>Backup &amp; restore</strong>
+       <span style="width:50px"></span>
+     </div>
+     <div class="sheet-body">
+       <p class="hint" style="margin-top:0">Saves all your ideas (with photos) and recipes in one file. Keep it somewhere safe, like Files or your computer.</p>
+       <button class="btn" data-act="export">Download backup</button>
+       <div class="sec">Restore</div>
+       <p class="hint" style="margin-top:0">Adds ideas and recipes from a backup file. Anything already here is left alone.</p>
+       <div class="field"><input type="file" id="restoreFile" accept=".json,application/json"></div>
+       <button class="btn ghost" data-act="restore">Restore from file</button>
+       <p class="hint" id="backupMsg"></p>
+     </div>`,
+    {
+      close: closeSheet,
+      export: (b) =>
+        busy(b, 'Preparing…', async () => {
+          try {
+            await exportBackup();
+            say('Backup file created.');
+          } catch (e) {
+            say(errText('make the backup', e), true);
+          }
+        }),
+      restore: (b) =>
+        busy(b, 'Restoring…', async () => {
+          const f = $('#restoreFile').files[0];
+          if (!f) return say('Choose a backup file first.', true);
+          let data;
+          try {
+            data = JSON.parse(await f.text());
+          } catch (e) {
+            return say("That file isn't a valid backup.", true);
+          }
+          if (!data || data.app !== 'date-ideas' || !Array.isArray(data.ideas)) return say("That file isn't a Date Ideas backup.", true);
+          let added = 0;
+          let skipped = 0;
+          let failed = 0;
+          let lastErr = null;
+          for (const old of data.ideas) {
+            if (ideas.some((x) => x.id === old.id)) {
+              skipped++;
+              continue;
+            }
+            try {
+              await importIdea(old);
+              added++;
+            } catch (e) {
+              failed++;
+              lastErr = e;
+            }
+          }
+          if (featuresReady) {
+            for (const r of data.recipes || []) {
+              if (recipes.some((x) => x.id === r.id)) {
+                skipped++;
+                continue;
+              }
+              try {
+                await saveRecipe(normalizeRecipe(r));
+                added++;
+              } catch (e) {
+                failed++;
+                lastErr = e;
+              }
+            }
+          }
+          await refresh();
+          say(`Added ${added}, skipped ${skipped} already here` + (failed ? `, ${failed} failed. ${errText('restore', lastErr)}` : '.'), failed > 0);
+        }),
+    }
+  );
+}
+
 // ---------- list screen ----------
+const cmp = (x, y) => (x === y ? 0 : x < y ? -1 : 1);
+const orBig = (v) => (v == null ? Infinity : v);
+const SORTERS = {
+  cost: (a, b) => cmp(orBig(a.cost), orBig(b.cost)),
+  duration: (a, b) => cmp(orBig(a.duration), orBig(b.duration)),
+  distance: (a, b) => cmp(orBig(a.distance), orBig(b.distance)),
+  title: (a, b) => a.title.localeCompare(b.title),
+};
+
 function visibleIdeas() {
   const f = filters;
   const season = f.season === 'now' ? currentSeason() : f.season;
@@ -290,14 +564,30 @@ function visibleIdeas() {
       if (f.duration !== '' && i.duration != null && i.duration > Number(f.duration)) return false;
       if (f.distance !== '' && i.distance != null && i.distance > Number(f.distance)) return false;
       if (season && i.seasons.length && !i.seasons.includes(season)) return false;
+      if (f.tag && !i.tags.includes(f.tag)) return false;
+      if (query) {
+        const hay = [i.title, i.address, i.description, i.notes, ...i.tags, ...i.checklist.map((c) => c.text)].join(' ').toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
       return true;
     })
-    .sort((a, b) => (tab === 'done' ? (b.doneDate || 0) - (a.doneDate || 0) : b.createdAt - a.createdAt));
+    .sort(SORTERS[f.sort] || ((a, b) => (tab === 'done' ? (b.doneDate || 0) - (a.doneDate || 0) : b.createdAt - a.createdAt)));
+}
+
+function visibleRecipes() {
+  return recipes
+    .filter((r) => !query || [r.title, r.ingredients, r.instructions, r.notes].join(' ').toLowerCase().includes(query))
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 function chipsHtml(i) {
-  const bits = [fmtCost(i.cost), fmtDur(i.duration), fmtDist(i.distance), ...i.seasons].filter(Boolean);
+  const bits = [fmtCost(i.cost), fmtDur(i.duration), fmtDist(i.distance), ...i.seasons, ...i.tags.map((t) => '#' + t)].filter(Boolean);
   return bits.map((t) => `<span class="chip">${esc(t)}</span>`).join('');
+}
+
+function reactionChip(id) {
+  const e = (feedback[id] || []).map((r) => REACT[r.reaction]).filter(Boolean);
+  return e.length ? `<span class="chip">${e.join(' ')}</span>` : '';
 }
 
 function cardHtml(i) {
@@ -309,24 +599,45 @@ function cardHtml(i) {
     <div class="card-body">
       <div class="card-title">${esc(i.title)}</div>
       ${i.address ? `<div class="card-sub">${esc(i.address)}</div>` : ''}
-      ${done}${chipsHtml(i)}
+      ${done}${reactionChip(i.id)}${chipsHtml(i)}
     </div>
   </div>`;
 }
 
+function recipeCardHtml(r) {
+  const n = r.ingredients.split('\n').filter((l) => l.trim()).length;
+  return `<div class="card" data-rid="${esc(r.id)}">
+    <div class="thumb">🍳</div>
+    <div class="card-body">
+      <div class="card-title">${esc(r.title)}</div>
+      ${r.servings ? `<span class="chip">Serves ${esc(fmtNum(r.servings))}</span>` : ''}<span class="chip">${n} ingredient${n === 1 ? '' : 's'}</span>
+    </div>
+  </div>`;
+}
+
+const SETUP_HINT = `Recipes and feedback need one more setup step.<br>Run <b>supabase-update.sql</b> in Supabase.`;
+
 function renderList() {
+  const isRecipes = view === 'recipes';
+  $('#tabs').classList.toggle('hidden', isRecipes);
+  $('#filterBtn').classList.toggle('hidden', isRecipes);
+  $$('#nav button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
+  $('#search').placeholder = isRecipes ? 'Search recipes…' : 'Search ideas…';
+
   let html;
   if (!loaded) {
     html = `<div class="empty">${loadFailed ? "Your ideas didn't load." : 'Loading…'}</div>`;
+  } else if (isRecipes) {
+    const list = visibleRecipes();
+    if (!featuresReady) html = `<div class="empty">${SETUP_HINT}</div>`;
+    else if (list.length) html = list.map(recipeCardHtml).join('');
+    else if (recipes.length) html = `<div class="empty">No recipes match your search.</div>`;
+    else html = `<div class="empty">No recipes yet.<br>Tap the + button to add one.</div>`;
   } else {
     const list = visibleIdeas();
-    if (list.length) {
-      html = list.map(cardHtml).join('');
-    } else if (ideas.length === 0) {
-      html = `<div class="empty">No ideas yet.<br>Tap the + button to add your first one.</div>`;
-    } else {
-      html = `<div class="empty">Nothing matches here.<br>Try another tab or reset your filters.</div>`;
-    }
+    if (list.length) html = list.map(cardHtml).join('');
+    else if (ideas.length === 0) html = `<div class="empty">No ideas yet.<br>Tap the + button to add your first one.</div>`;
+    else html = `<div class="empty">Nothing matches here.<br>Try another tab, search, or reset your filters.</div>`;
   }
   $('#list').innerHTML = html;
   const n = Object.values(filters).filter((v) => v !== '').length;
@@ -335,18 +646,22 @@ function renderList() {
 }
 
 function renderFoot() {
-  $('#foot').innerHTML = user ? `Signed in as ${esc(user.email)} · <button class="link" data-signout>Sign out</button>` : '';
+  $('#foot').innerHTML = user
+    ? `Signed in as ${esc(user.email)}<br><button class="link" data-backup>Backup &amp; restore</button> · <button class="link" data-signout>Sign out</button>`
+    : '';
 }
 
 // ---------- panel (full-screen sheet) ----------
-function openSheet(html, acts) {
+function openSheet(html, acts, keepScroll = false) {
   const inner = $('#sheetInner');
+  const prev = $('.sheet-body', inner);
+  const top = keepScroll && prev ? prev.scrollTop : 0;
   inner.innerHTML = html;
   actions = acts || {};
   $('#sheet').classList.remove('hidden');
   document.body.classList.add('lock');
   const body = $('.sheet-body', inner);
-  if (body) body.scrollTop = 0;
+  if (body) body.scrollTop = top;
 }
 function closeSheet() {
   $('#sheet').classList.add('hidden');
@@ -359,8 +674,23 @@ $('#sheet').addEventListener('click', (e) => {
   if (b && actions[b.dataset.act]) actions[b.dataset.act](b, e);
 });
 
-// ---------- detail screen ----------
-function showDetail(id) {
+// ---------- idea detail screen ----------
+function feedbackHtml(i) {
+  if (!featuresReady) return `<div class="sec">How we feel</div><p class="hint">${SETUP_HINT}</p>`;
+  const rows = feedback[i.id] || [];
+  const mine = rows.find((r) => r.user_id === user.id) || { reaction: null, comment: '' };
+  const others = rows
+    .filter((r) => r.user_id !== user.id && (r.reaction || r.comment))
+    .map((r) => `<div class="fb"><b>${esc(niceName(r.author))}</b> ${REACT[r.reaction] || ''}${r.comment ? `<p class="pre">${esc(r.comment)}</p>` : ''}</div>`)
+    .join('');
+  return `<div class="sec">How we feel</div>
+    ${others}
+    <div class="react">${['up', 'meh', 'down'].map((k) => `<button type="button" class="rbtn ${mine.reaction === k ? 'on' : ''}" data-act="react" data-r="${k}" aria-label="${k}">${REACT[k]}</button>`).join('')}</div>
+    <div class="field" style="margin-top:10px"><textarea id="fbComment" placeholder="Add a comment (optional)">${esc(mine.comment)}</textarea></div>
+    <button class="btn ghost" style="margin-top:0" data-act="savecomment">Save comment</button>`;
+}
+
+function showDetail(id, keepScroll = false) {
   const i = ideas.find((x) => x.id === id);
   if (!i) return closeSheet();
 
@@ -398,12 +728,34 @@ function showDetail(id) {
        ${i.description ? `<div class="sec">About</div><p class="pre">${esc(i.description)}</p>` : ''}
        ${i.notes ? `<div class="sec">Notes</div><p class="pre">${esc(i.notes)}</p>` : ''}
        ${checklist}
+       ${feedbackHtml(i)}
        ${finish}
        <button class="btn danger" style="margin-top:28px" data-act="del">Delete idea</button>
      </div>`,
     {
       close: closeSheet,
       edit: () => showForm(id),
+      react: async (b) => {
+        const k = b.dataset.r;
+        const mine = (feedback[id] || []).find((r) => r.user_id === user.id);
+        const next = mine && mine.reaction === k ? null : k;
+        try {
+          await saveFeedback(id, { reaction: next, comment: $('#fbComment').value.trim() });
+        } catch (e) {
+          return toast(errText('save', e), true);
+        }
+        renderList();
+        showDetail(id, true);
+      },
+      savecomment: (b) =>
+        busy(b, 'Saving…', async () => {
+          try {
+            await saveFeedback(id, { comment: $('#fbComment').value.trim() });
+          } catch (e) {
+            return toast(errText('save', e), true);
+          }
+          toast('Saved.');
+        }),
       complete: (b) =>
         busy(b, 'Saving…', async () => {
           let path = null;
@@ -448,10 +800,12 @@ function showDetail(id) {
         }
         removePhotos([i.image, i.donePhoto]);
         ideas = ideas.filter((x) => x.id !== id);
+        delete feedback[id];
         renderList();
         closeSheet();
       },
-    }
+    },
+    keepScroll
   );
 
   // tick checklist items
@@ -493,7 +847,7 @@ function showDetail(id) {
   }
 }
 
-// ---------- add / edit screen ----------
+// ---------- add / edit idea screen ----------
 function clRow(text = '', done = false) {
   return `<div class="cl-row" data-done="${done ? 1 : 0}">
     <input type="text" value="${esc(text)}" placeholder="e.g. Bring a blanket">
@@ -539,6 +893,9 @@ function showForm(id) {
        <div class="field seasons"><label>Best seasons (leave empty for any time)</label>
          ${SEASONS.map((s) => `<label><input type="checkbox" name="season" value="${s}" ${idea && idea.seasons.includes(s) ? 'checked' : ''}>${s}</label>`).join('')}
        </div>
+
+       <div class="field"><label>Tags (separate with commas)</label>
+         <input type="text" id="f-tags" value="${esc(idea ? idea.tags.join(', ') : '')}" placeholder="rainy day, outdoors, cozy" autocapitalize="none"></div>
 
        <div class="field"><label>Description</label>
          <textarea id="f-description">${esc(idea ? idea.description : '')}</textarea></div>
@@ -592,6 +949,7 @@ function showForm(id) {
             duration,
             distance,
             seasons: $$('input[name=season]:checked').map((c) => c.value),
+            tags: [...new Set($('#f-tags').value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean))],
             description: $('#f-description').value.trim(),
             notes: $('#f-notes').value.trim(),
             checklist: $$('.cl-row')
@@ -642,10 +1000,132 @@ function showForm(id) {
   });
 }
 
+// ---------- recipes ----------
+function showRecipe(id, servings, keepScroll = false) {
+  const r = recipes.find((x) => x.id === id);
+  if (!r) return closeSheet();
+  const base = r.servings || null;
+  const want = servings || base;
+  const scale = base && want ? want / base : 1;
+  const lines = r.ingredients
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => convertLine(l, scale));
+
+  openSheet(
+    `<div class="sheet-head">
+       <button class="link" data-act="close">‹ Back</button>
+       <button class="link strong" data-act="edit">Edit</button>
+     </div>
+     <div class="sheet-body">
+       <h2 class="detail-title">${esc(r.title)}</h2>
+       ${base ? `<div class="field" style="margin-top:12px"><label>Servings</label><input type="number" id="rcServ" inputmode="decimal" min="1" step="any" value="${esc(fmtNum(want))}"></div>` : ''}
+       <div class="sec">Ingredients</div>
+       ${lines.map((x) => `<div class="ing"><span>${esc(x.text)}</span>${x.grams != null ? `<span class="chip">≈ ${x.grams} g</span>` : ''}</div>`).join('') || '<p class="hint">No ingredients yet.</p>'}
+       <p class="hint">Grams are estimates for common ingredients (for example, a cup of all-purpose flour is about 120 g). Lines without a gram amount are left as written.</p>
+       ${r.instructions ? `<div class="sec">Steps</div><p class="pre">${esc(r.instructions)}</p>` : ''}
+       ${r.notes ? `<div class="sec">Notes</div><p class="pre">${esc(r.notes)}</p>` : ''}
+       ${r.source ? `<div class="sec">Source</div><p class="pre">${esc(r.source)}</p>` : ''}
+       <button class="btn danger" style="margin-top:28px" data-act="del">Delete recipe</button>
+     </div>`,
+    {
+      close: closeSheet,
+      edit: () => showRecipeForm(id),
+      del: async (b) => {
+        if (!confirm('Delete this recipe?')) return;
+        try {
+          await busy(b, 'Deleting…', async () => {
+            const { error } = await sb.from('recipes').delete().eq('id', id);
+            if (error) throw error;
+          });
+        } catch (e) {
+          return toast(errText('delete', e), true);
+        }
+        recipes = recipes.filter((x) => x.id !== id);
+        renderList();
+        closeSheet();
+      },
+    },
+    keepScroll
+  );
+
+  const serv = $('#rcServ');
+  if (serv) {
+    serv.addEventListener('change', () => {
+      const v = Number(serv.value);
+      if (v > 0) showRecipe(id, v, true);
+    });
+  }
+}
+
+function showRecipeForm(id) {
+  const rec = id ? recipes.find((x) => x.id === id) : null;
+  openSheet(
+    `<div class="sheet-head">
+       <button class="link" data-act="cancel">Cancel</button>
+       <strong>${rec ? 'Edit recipe' : 'New recipe'}</strong>
+       <button class="link strong" data-act="save">Save</button>
+     </div>
+     <div class="sheet-body">
+       <div class="field"><label>Title *</label>
+         <input type="text" id="r-title" value="${esc(rec ? rec.title : '')}" placeholder="Homemade pizza"></div>
+       <div class="field"><label>Servings</label>
+         <input type="number" id="r-serv" inputmode="decimal" min="1" step="any" value="${rec && rec.servings ? esc(rec.servings) : ''}" placeholder="2"></div>
+       <div class="field"><label>Ingredients (one per line)</label>
+         <textarea id="r-ing" style="min-height:150px" placeholder="2 cups all-purpose flour&#10;1 1/2 tsp salt&#10;3 large eggs">${esc(rec ? rec.ingredients : '')}</textarea>
+         <p class="hint">Write the amount first, like "1/2 cup sugar". The app shows estimated grams where it can.</p></div>
+       <div class="field"><label>Steps</label>
+         <textarea id="r-steps" style="min-height:120px">${esc(rec ? rec.instructions : '')}</textarea></div>
+       <div class="field"><label>Notes</label>
+         <textarea id="r-notes">${esc(rec ? rec.notes : '')}</textarea></div>
+       <div class="field"><label>Source (optional)</label>
+         <input type="text" id="r-src" value="${esc(rec ? rec.source : '')}" placeholder="Website, video, or person" autocapitalize="none"></div>
+       <div class="error" id="formError"></div>
+     </div>`,
+    {
+      cancel: () => (rec ? showRecipe(id) : closeSheet()),
+      save: (b) =>
+        busy(b, 'Saving…', async () => {
+          const err = $('#formError');
+          err.textContent = '';
+          const title = $('#r-title').value.trim();
+          if (!title) return (err.textContent = 'Please add a title.');
+          const sv = $('#r-serv').value.trim();
+          const servings = sv === '' ? null : Number(sv);
+          if (servings !== null && !(servings > 0)) return (err.textContent = 'Servings must be a number above 0.');
+          const item = rec || { id: uid(), createdAt: Date.now() };
+          const snap = JSON.parse(JSON.stringify(item));
+          Object.assign(item, {
+            title,
+            servings,
+            ingredients: $('#r-ing').value.trim(),
+            instructions: $('#r-steps').value.trim(),
+            notes: $('#r-notes').value.trim(),
+            source: $('#r-src').value.trim(),
+          });
+          try {
+            await saveRecipe(item);
+          } catch (e) {
+            if (rec) {
+              Object.keys(item).forEach((k) => delete item[k]);
+              Object.assign(item, snap);
+            }
+            return (err.textContent = errText('save', e) + ' Your changes are still here.');
+          }
+          if (!rec) recipes.push(item);
+          renderList();
+          showRecipe(item.id);
+        }),
+    }
+  );
+}
+
 // ---------- filter screen ----------
 function showFilters() {
-  const opt = (v, label, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${label}</option>`;
+  const opt = (v, label, cur) => `<option value="${esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(label)}</option>`;
   const f = filters;
+  const allTags = [...new Set(ideas.flatMap((i) => i.tags))].sort();
   const countText = () => `Show ${visibleIdeas().length} idea${visibleIdeas().length === 1 ? '' : 's'}`;
 
   openSheet(
@@ -672,6 +1152,11 @@ function showFilters() {
            <select data-key="season">
              ${opt('', 'Any', f.season)}${opt('now', `Right now (${currentSeason()})`, f.season)}${SEASONS.map((s) => opt(s, s, f.season)).join('')}
            </select></div>
+         ${allTags.length ? `<div class="field"><label>Tag</label><select data-key="tag">${opt('', 'Any', f.tag)}${allTags.map((t) => opt(t, '#' + t, f.tag)).join('')}</select></div>` : ''}
+         <div class="field"><label>Sort by</label>
+           <select data-key="sort">
+             ${opt('', 'Newest first', f.sort)}${opt('cost', 'Cheapest first', f.sort)}${opt('duration', 'Shortest first', f.sort)}${opt('distance', 'Closest first', f.sort)}${opt('title', 'Name A–Z', f.sort)}
+           </select></div>
        </div>
        <p class="hint">Ideas with a blank value for something still show up. Distance uses the "Miles away" number you type in on each idea.</p>
        <button class="btn" data-act="close" id="showBtn">${countText()}</button>
@@ -679,7 +1164,7 @@ function showFilters() {
     {
       close: closeSheet,
       reset: () => {
-        filters = { cost: '', duration: '', distance: '', season: '' };
+        filters = { cost: '', duration: '', distance: '', season: '', tag: '', sort: '' };
         renderList();
         showFilters();
       },
@@ -738,6 +1223,7 @@ function showLogin(msg = '') {
 }
 
 $('#foot').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-backup]')) return showBackup();
   if (!e.target.closest('[data-signout]')) return;
   try {
     await sb.auth.signOut();
@@ -746,6 +1232,8 @@ $('#foot').addEventListener('click', async (e) => {
   }
   user = null;
   ideas = [];
+  recipes = [];
+  feedback = {};
   loaded = false;
   loadFailed = false;
   urlMap = {};
@@ -759,6 +1247,10 @@ $('#foot').addEventListener('click', async (e) => {
 // ---------- wire up the main screen ----------
 $('#addBtn').addEventListener('click', () => {
   if (!loaded) return toast('Your ideas are still loading.', true);
+  if (view === 'recipes') {
+    if (!featuresReady) return toast('Recipes need one more setup step: run supabase-update.sql in Supabase.', true);
+    return showRecipeForm(null);
+  }
   showForm(null);
 });
 $('#filterBtn').addEventListener('click', showFilters);
@@ -769,9 +1261,22 @@ $('#tabs').addEventListener('click', (e) => {
   tab = b.dataset.tab;
   renderList();
 });
+$('#nav').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  view = b.dataset.view;
+  renderList();
+  window.scrollTo(0, 0);
+});
+$('#search').addEventListener('input', (e) => {
+  query = e.target.value.trim().toLowerCase();
+  renderList();
+});
 $('#list').addEventListener('click', (e) => {
   const card = e.target.closest('.card');
-  if (card) showDetail(card.dataset.id);
+  if (!card) return;
+  if (card.dataset.rid) showRecipe(card.dataset.rid);
+  else showDetail(card.dataset.id);
 });
 // Pick up changes from your other device whenever the app comes back to the front.
 document.addEventListener('visibilitychange', () => {

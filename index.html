@@ -34,12 +34,18 @@
   </div>
 
   <main>
+    <input id="search" type="search" placeholder="Search ideas…" autocomplete="off" autocapitalize="none">
     <div id="migrate" class="migrate hidden"></div>
     <div id="list"></div>
     <div id="foot" class="foot"></div>
   </main>
 
-  <button id="addBtn" class="fab" aria-label="Add idea">+</button>
+  <button id="addBtn" class="fab" aria-label="Add">+</button>
+
+  <nav id="nav" class="nav">
+    <button data-view="ideas">💡 Ideas</button>
+    <button data-view="recipes">🍳 Recipes</button>
+  </nav>
 
   <div id="sheet" class="sheet hidden">
     <div id="sheetInner" class="sheet-inner"></div>
