@@ -64,7 +64,7 @@ function normalize(i) {
   return {
     title: '', image: '', address: '', cost: null, duration: null, distance: null,
     seasons: [], tags: [], description: '', notes: '', checklist: [],
-    done: false, doneDate: null, donePhoto: '', createdAt: Date.now(), surprise: null,
+    done: false, doneDate: null, donePhoto: '', createdAt: Date.now(), surprise: null, history: [],
     ...i,
   };
 }
@@ -189,6 +189,7 @@ function convertLine(line, scale = 1) {
 // ---------- messages ----------
 function errText(action, e) {
   const m = (e && e.message) || String(e || '');
+  if (/^(Photos|Reactions) need internet/.test(m)) return m;
   if (!navigator.onLine || /failed to fetch|network|load failed/i.test(m)) return `Could not ${action}. Check your internet and try again.`;
   if (/row-level security|permission denied/i.test(m)) return `Could not ${action}: this account isn't allowed. Try signing out and back in.`;
   if (/jwt|expired|not authenticated/i.test(m)) return `Could not ${action}: your sign-in expired. Sign out and back in.`;
@@ -238,7 +239,7 @@ async function loadIdeas() {
   const { data, error } = await sb.from('ideas').select('id,data');
   if (error) throw error;
   const list = (data || []).map((r) => normalize({ ...r.data, id: r.id }));
-  const paths = [...new Set(list.flatMap((i) => [i.image, i.donePhoto]).filter(Boolean))];
+  const paths = [...new Set(list.flatMap((i) => [i.image, i.donePhoto, ...i.history.map((h) => h.photo)]).filter(Boolean))];
   if (paths.length) {
     const { data: signed, error: e2 } = await sb.storage.from(BUCKET).createSignedUrls(paths, URL_TTL);
     if (e2) throw e2;
@@ -265,12 +266,29 @@ async function loadIdeas() {
   ideas = list;
   loaded = true;
   loadFailed = false;
+  offlineMode = false;
   lastLoad = Date.now();
+  try { localStorage.setItem('date-ideas-last-user', user.id); } catch (e) { /* ok */ }
+  cacheNow();
 }
 
 async function saveRow(table, obj) {
+  if (isOffline()) return queueOp({ op: 'save', table, obj: JSON.parse(JSON.stringify(obj)) });
   const { id, ...rest } = obj;
   const { error } = await sb.from(table).upsert({ id, data: rest, updated_at: new Date().toISOString() });
+  if (error) throw error;
+}
+// Saves several rows in one go (used by "Add many ideas").
+async function saveRows(table, objs) {
+  if (isOffline()) return objs.forEach((o) => queueOp({ op: 'save', table, obj: JSON.parse(JSON.stringify(o)) }));
+  const stamp = new Date().toISOString();
+  const rows = objs.map(({ id, ...data }) => ({ id, data, updated_at: stamp }));
+  const { error } = await sb.from(table).upsert(rows);
+  if (error) throw error;
+}
+async function deleteRow(table, id) {
+  if (isOffline()) return queueOp({ op: 'del', table, id });
+  const { error } = await sb.from(table).delete().eq('id', id);
   if (error) throw error;
 }
 const saveIdea = (i) => saveRow('ideas', i);
@@ -288,6 +306,7 @@ function isMissingTable(e) {
 // latest row and returns the object (used for the toggle-a-reaction click).
 const feedbackQueue = {};
 function saveFeedback(ideaId, patch) {
+  if (isOffline()) return Promise.reject(new Error('Reactions need internet. Try again when you’re back online.'));
   const run = async () => {
     const mine = (feedback[ideaId] || []).find((r) => r.user_id === user.id) || { reaction: null, comment: '' };
     const change = typeof patch === 'function' ? patch(mine) : patch;
@@ -311,6 +330,7 @@ function saveFeedback(ideaId, patch) {
 }
 
 async function uploadPhoto(ideaId, blob) {
+  if (isOffline()) throw new Error('Photos need internet. Remove the photo, or save when you’re back online.');
   const path = `${ideaId}/${uid()}.jpg`;
   const { error } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg', cacheControl: '3600' });
   if (error) throw error;
@@ -342,8 +362,11 @@ async function refresh() {
   const btn = $('#refreshBtn');
   btn.disabled = true;
   try {
+    if (isOffline()) throw new Error('offline');
+    await flushQueue(); // send waiting offline changes first
     await loadIdeas();
     setBanner('');
+    offlineBanner();
     renderList();
     return true;
   } catch (e) {
@@ -421,6 +444,14 @@ async function importIdea(old) {
         item[key] = p;
       }
     }
+    for (const h of item.history || []) {
+      if (h.photo && String(h.photo).startsWith('data:')) {
+        const blob = await (await fetch(h.photo)).blob();
+        const p = await uploadPhoto(item.id, blob);
+        made.push(p);
+        h.photo = p;
+      }
+    }
     await saveIdea(item);
   } catch (e) {
     removePhotos(made);
@@ -472,6 +503,9 @@ async function exportBackup() {
     const c = JSON.parse(JSON.stringify(i));
     for (const key of ['image', 'donePhoto']) {
       if (c[key]) c[key] = await urlToDataUrl(photoUrl(c[key]));
+    }
+    for (const h of c.history || []) {
+      if (h.photo) h.photo = await urlToDataUrl(photoUrl(h.photo));
     }
     out.ideas.push(c);
   }
@@ -664,6 +698,8 @@ function visibleRecipes() {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+const timesDone = (i) => (i.history || []).length + (i.done ? 1 : 0);
+
 function giftChip(i) {
   if (!i.surprise) return '';
   const mineIt = user && i.surprise.by === user.id;
@@ -672,7 +708,7 @@ function giftChip(i) {
 }
 
 function chipsHtml(i) {
-  const bits = [fmtCost(i.cost), fmtDur(i.duration), fmtDist(i.distance), ...i.seasons, ...i.tags.map((t) => '#' + t)].filter(Boolean);
+  const bits = [fmtCost(i.cost), fmtDur(i.duration), fmtDist(i.distance), ...i.seasons, ...i.tags.map(tagLabel)].filter(Boolean);
   return bits.map((t) => `<span class="chip">${esc(t)}</span>`).join('');
 }
 
@@ -694,7 +730,9 @@ function emptyBox(pose, title, text) {
 
 function cardHtml(i) {
   const u = photoUrl(i.image);
-  const thumb = u ? `<img class="thumb" src="${esc(u)}" alt="">` : `<div class="thumb">${miniHeart()}</div>`;
+  const icon = ideaIcon(i);
+  const thumb = u ? `<img class="thumb" src="${esc(u)}" alt="">` : `<div class="thumb">${icon ? `<span class="ticon">${icon}</span>` : miniHeart()}</div>`;
+  const times = timesDone(i);
   const done = i.done ? `<span class="chip ok">✓ Done ${esc(fmtDate(i.doneDate))}</span>` : '';
   return `<div class="card ${colorOf(i.id)} ${i.done ? 'done' : ''}" data-id="${esc(i.id)}">
     <div class="card-top">
@@ -704,7 +742,7 @@ function cardHtml(i) {
       </div>
       ${thumb}
     </div>
-    <div>${giftChip(i)}${done}${reactionChip(i.id)}${chipsHtml(i)}</div>
+    <div>${giftChip(i)}${done}${times > 1 ? `<span class="chip">🔁 ${times}×</span>` : ''}${reactionChip(i.id)}${chipsHtml(i)}</div>
   </div>`;
 }
 
@@ -755,6 +793,7 @@ function renderList() {
     else html = welcome + emptyBox('empty', 'Nothing matches here', 'Try another tab, search, or reset your filters.');
   }
   $('#list').innerHTML = html;
+  cacheSoon();
   $('#list').classList.toggle('enter', animateNext);
   animateNext = false;
   const n = Object.values(filters).filter((v) => v !== '').length;
@@ -816,7 +855,7 @@ function showAnniversary() {
 
 function renderFoot() {
   $('#foot').innerHTML = user
-    ? `Signed in as ${esc(user.email)}<br><button class="link" data-look>Look: ${THEME_NAMES[themePref()]}</button> · <button class="link" data-anniv>Anniversary</button><br><button class="link" data-backup>Backup &amp; restore</button> · <button class="link" data-signout>Sign out</button>`
+    ? `Signed in as ${esc(user.email)}<br><button class="link" data-settings>Settings</button> · <button class="link" data-backup>Backup &amp; restore</button> · <button class="link" data-signout>Sign out</button>`
     : '';
 }
 
@@ -897,12 +936,17 @@ function showDetail(id) {
        ${doneImg ? `<img class="hero" style="margin-top:10px" src="${esc(doneImg)}" alt="Our photo">` : ''}
        <div class="field" style="margin-top:10px"><label>${i.donePhoto ? 'Replace photo' : 'Add a photo (optional)'}</label>
          <input type="file" id="donePhoto" accept="image/*"></div>
+       <button class="btn" data-act="again">🔁 Do this again</button>
        <button class="btn ghost" data-act="undo">Move back to To do</button>`
     : `<div class="sec">Did you do this one?</div>
        <div class="field"><label>Add a photo (optional)</label>
          <input type="file" id="donePhoto" accept="image/*"></div>
        <button class="btn" data-act="complete">✓ Mark as completed</button>`;
 
+  const past = (i.history || []).length
+    ? `<div class="sec">Past dates (${i.history.length})</div>` +
+      [...i.history].reverse().map((h) => `<div class="past"><b>✓ ${esc(fmtDate(h.date))}</b>${photoUrl(h.photo) ? `<img class="hero small" src="${esc(photoUrl(h.photo))}" alt="">` : ''}</div>`).join('')
+    : '';
   const heroUrl = photoUrl(i.image);
   openSheet(
     `<div class="sheet-head">
@@ -912,14 +956,16 @@ function showDetail(id) {
      <div class="sheet-body">
        ${heroUrl ? `<img class="hero" src="${esc(heroUrl)}" alt="">` : ''}
        <h2 class="detail-title">${esc(i.title)}</h2>
-       <div>${giftChip(i)}${chipsHtml(i)}</div>
-       ${i.address ? `<div class="sec">Where</div><p class="pre">${esc(i.address)}</p>` : ''}
+       <div>${giftChip(i)}${timesDone(i) > 1 ? `<span class="chip">🔁 Done ${timesDone(i)} times</span>` : ''}${chipsHtml(i)}</div>
+       ${i.surprise && todayStr() < i.surprise.date ? '' : '<button class="link" style="padding:8px 0" data-act="sharecard">📤 Share as a picture</button>'}
+       ${i.address ? `<div class="sec">Where</div><p class="pre">${esc(i.address)}</p><p style="margin:6px 0 0"><a class="maplink" href="https://maps.apple.com/?q=${encodeURIComponent(i.address)}" target="_blank" rel="noopener noreferrer">🗺️ Open in Maps</a></p>` : ''}
        ${i.description ? `<div class="sec">About</div><p class="pre">${esc(i.description)}</p>` : ''}
        ${i.notes ? `<div class="sec">Notes</div><p class="pre">${esc(i.notes)}</p>` : ''}
        ${safeUrl(i.sourceLink) ? `<div class="sec">Source link</div><p class="pre"><a href="${esc(safeUrl(i.sourceLink))}" target="_blank" rel="noopener noreferrer" style="word-break:break-all">${esc(i.sourceLink)}</a></p><p class="hint">${esc(LINK_WARNING)}</p>` : ''}
        ${checklist}
        ${feedbackHtml(i)}
        ${finish}
+       ${past}
        <button class="btn danger" style="margin-top:28px" data-act="del">Delete idea</button>
      </div>`,
     {
@@ -972,6 +1018,31 @@ function showDetail(id) {
           celebrate();
           if (sheetToken === token) showDetail(id);
         }),
+      sharecard: (b) =>
+        busy(b, 'Making picture…', async () => {
+          try {
+            await shareIdeaCard(i);
+          } catch (e) {
+            toast('Couldn’t make the picture.', true);
+          }
+        }),
+      again: (b) =>
+        busy(b, 'Saving…', async () => {
+          const token = sheetToken;
+          try {
+            await update(i, () => {
+              i.history = [...(i.history || []), { date: i.doneDate || Date.now(), photo: i.donePhoto || '' }];
+              i.done = false;
+              i.doneDate = null;
+              i.donePhoto = '';
+            });
+          } catch (e) {
+            return toast(errText('save', e), true);
+          }
+          renderList();
+          toast('Back on your To do list.');
+          if (sheetToken === token) showDetail(id);
+        }),
       undo: (b) =>
         busy(b, 'Saving…', async () => {
           const token = sheetToken;
@@ -988,14 +1059,11 @@ function showDetail(id) {
       del: async (b) => {
         if (!confirm('Delete this idea?')) return;
         try {
-          await busy(b, 'Deleting…', async () => {
-            const { error } = await sb.from('ideas').delete().eq('id', id);
-            if (error) throw error;
-          });
+          await busy(b, 'Deleting…', () => deleteRow('ideas', id));
         } catch (e) {
           return toast(errText('delete', e), true);
         }
-        removePhotos([i.image, i.donePhoto]);
+        removePhotos([i.image, i.donePhoto, ...(i.history || []).map((h) => h.photo)]);
         ideas = ideas.filter((x) => x.id !== id);
         delete feedback[id];
         renderList();
@@ -1070,7 +1138,7 @@ function showForm(id, prefill) {
        <button class="link strong" data-act="save">Save</button>
      </div>
      <div class="sheet-body">
-       ${idea ? '' : pf ? `<p class="hint" style="margin:0 0 12px">Filled in from your import. Check it and fix anything. Only what is below gets saved.</p>` : `<button type="button" class="btn ghost" style="margin:0 0 14px" data-act="import">✨ Import from a link, screenshot or notes</button>`}
+       ${idea ? '' : pf ? `<p class="hint" style="margin:0 0 12px">Filled in from your import. Check it and fix anything. Only what is below gets saved.</p>` : `<button type="button" class="btn ghost" style="margin:0 0 8px" data-act="import">✨ Import from a link, screenshot or notes</button><button type="button" class="btn ghost" style="margin:0 0 14px" data-act="bulk">📝 Add many ideas at once</button>`}
        <div class="field"><label>Title *</label>
          <input type="text" id="f-title" value="${esc(idea ? idea.title : pv('title'))}" placeholder="Sunset picnic at the park"></div>
 
@@ -1080,7 +1148,10 @@ function showForm(id, prefill) {
          <button type="button" class="link ${image ? '' : 'hidden'}" id="rmPhoto" data-act="rmphoto">Remove photo</button></div>
 
        <div class="field"><label>Location / address</label>
-         <input type="text" id="f-address" value="${esc(idea ? idea.address : pv('address'))}" placeholder="123 Main St, or just a place name"></div>
+         <input type="text" id="f-address" value="${esc(idea ? idea.address : pv('address'))}" placeholder="123 Main St, or just a place name">
+         <button type="button" class="link" style="padding:8px 0 0" data-act="lookup">🔎 Look up address</button>
+         <div id="lookupBox"></div>
+         <p class="hint" style="margin-top:2px">Lookup sends what you typed to OpenStreetMap, a free map service. Only when you tap it.</p></div>
 
        <div class="row3 field">
          <div><label style="font-size:14px;color:var(--muted)">Cost ($)</label>
@@ -1120,6 +1191,12 @@ function showForm(id, prefill) {
      </div>`,
     {
       import: () => showImport(),
+      bulk: () => showBulk(),
+      lookup: (b) => runLookup(b),
+      pickaddr: (b) => {
+        $('#f-address').value = b.dataset.a;
+        $('#lookupBox').innerHTML = '';
+      },
       cancel: () => {
         if (pf) Object.keys(pf).forEach((k) => delete pf[k]); // forget the import guess
         idea ? showDetail(id) : closeSheet();
@@ -1262,10 +1339,7 @@ function showRecipe(id, servings, keepScroll = false) {
       del: async (b) => {
         if (!confirm('Delete this recipe?')) return;
         try {
-          await busy(b, 'Deleting…', async () => {
-            const { error } = await sb.from('recipes').delete().eq('id', id);
-            if (error) throw error;
-          });
+          await busy(b, 'Deleting…', () => deleteRow('recipes', id));
         } catch (e) {
           return toast(errText('delete', e), true);
         }
@@ -1517,8 +1591,7 @@ function showLogin(msg = '') {
 }
 
 $('#foot').addEventListener('click', async (e) => {
-  if (e.target.closest("[data-look]")) return cycleTheme();
-  if (e.target.closest('[data-anniv]')) return showAnniversary();
+  if (e.target.closest('[data-settings]')) return showSettings();
   if (e.target.closest('[data-backup]')) return showBackup();
   if (!e.target.closest('[data-signout]')) return;
   try {
@@ -1526,6 +1599,7 @@ $('#foot').addEventListener('click', async (e) => {
   } catch (err) {
     /* the sign-in is cleared on this device either way */
   }
+  try { localStorage.removeItem(`date-ideas-cache-${user.id}`); localStorage.removeItem('date-ideas-last-user'); } catch (err) { /* ok */ }
   user = null;
   ideas = [];
   recipes = [];
@@ -1586,6 +1660,7 @@ async function startApp() {
   renderList();
   renderFoot();
   try {
+    if (isOffline()) throw new Error('offline');
     const { data: ok, error } = await sb.rpc('is_member');
     if (error) throw error;
     if (!ok) {
@@ -1594,15 +1669,28 @@ async function startApp() {
       renderFoot();
       return showLogin("This account hasn't been added to the app yet.");
     }
+    await flushQueue(); // send changes made while offline first
     await loadIdeas();
   } catch (e) {
+    // No internet: show the last saved copy instead of an error.
+    const c = !loaded && user ? readCache(user.id) : null;
+    if (c && (isOffline() || /failed to fetch|network|load failed|offline/i.test((e && e.message) || ''))) {
+      useCache(c);
+      renderList();
+      renderFoot();
+      if (isOffline()) offlineBanner();
+      else setBanner('Couldn’t reach the internet. Showing your last saved copy.', startApp);
+      return;
+    }
     if (!loaded) loadFailed = true;
     renderList();
     return setBanner(errText('load your ideas', e), startApp);
   }
   setBanner('');
+  offlineBanner();
   renderList();
   checkLocal();
+  maybeTour();
 }
 
 (async function init() {
@@ -1614,7 +1702,21 @@ async function startApp() {
     $('#list').innerHTML = emptyBox('oops', 'Setup needed', 'Open <b>config.js</b> and paste in your Supabase URL and key.');
     return;
   }
+  initPull();
+  initOffline();
   if (!window.supabase) {
+    // The sync code couldn't load. If we have a saved copy, show it read-only and reload when the internet is back.
+    const lu = lastCachedUser();
+    const c = lu && readCache(lu.id);
+    if (c) {
+      user = lu;
+      useCache(c);
+      renderList();
+      renderFoot();
+      setBanner('You’re offline. Showing your last saved copy. Changes can’t be made until you’re back online.');
+      window.addEventListener('online', () => location.reload());
+      return;
+    }
     $('#list').innerHTML = emptyBox('oops', "Couldn't load the sync code", 'Check your internet and reload.');
     return;
   }
@@ -1626,6 +1728,8 @@ async function startApp() {
   } catch (e) {
     /* treated as signed out */
   }
+  // Offline and the sign-in can't be checked: use the person who was last signed in on this phone.
+  if (!session && isOffline() && lastCachedUser()) session = { user: lastCachedUser() };
   renderList();
   if (!session) return showLogin();
   user = session.user;

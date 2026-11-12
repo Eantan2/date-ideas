@@ -264,3 +264,48 @@ html[data-theme=dark] .empty .mascot, html[data-theme=dark] .login-mascot .masco
 @keyframes pop { 0% { transform: scale(1) } 40% { transform: scale(1.35) rotate(-6deg) } 100% { transform: scale(1) } }
 .toast { animation: sheetup .25s ease; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ===== settings, tour, lookup, pull-down, history ===== */
+button, input, textarea, select { font-family: inherit; }
+html[data-font=rounded] body, html[data-font=rounded] button, html[data-font=rounded] input, html[data-font=rounded] textarea, html[data-font=rounded] select {
+  font-family: ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+html { --z: 1; }
+html[data-size=large] { --z: 1.14; }
+html[data-size=xlarge] { --z: 1.3; }
+body { font-size: calc(16px * var(--z)); }
+h1 { font-size: calc(30px * var(--z)); }
+.card-title { font-size: calc(22px * var(--z)); }
+.card-sub, .hint, .field > label, .sec { font-size: calc(14px * var(--z)); }
+.chip { font-size: calc(13px * var(--z)); }
+.detail-title { font-size: calc(32px * var(--z)); }
+.btn, .link, .tabs button, .nav button { font-size: calc(17px * var(--z)); }
+.welcome b { font-size: calc(21px * var(--z)); }
+.welcome span { font-size: calc(14px * var(--z)); }
+input[type=text], input[type=number], input[type=email], input[type=url], input[type=password], input[type=search], input[type=date], select, textarea { font-size: calc(16px * var(--z)); }
+input[type=date] { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--text); font-family: inherit; }
+
+.seg { display: flex; background: var(--tabs); border-radius: 999px; padding: 4px; gap: 2px; }
+.seg button { flex: 1; border: 0; background: none; padding: 10px 6px; border-radius: 999px; color: var(--muted); font-weight: 700; font-size: calc(15px * var(--z)); }
+.seg button.on { background: var(--pink); color: #fff; }
+
+.tour { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--veil); }
+.tour-card { width: 100%; max-width: 360px; background: var(--surface); border-radius: 32px; padding: 22px 22px 14px; text-align: center; box-shadow: 0 10px 40px rgba(60,30,20,.25); }
+.tour-card .mascot { margin: 0 auto 6px; color: var(--text); }
+.tour-card b { display: block; font-size: calc(22px * var(--z)); margin-bottom: 6px; }
+.tour-card p { color: var(--muted); margin: 0 0 12px; }
+.dots { display: flex; justify-content: center; gap: 6px; margin-bottom: 4px; }
+.dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.dots i.on { background: var(--pink); width: 22px; border-radius: 8px; }
+
+.pickaddr { display: block; width: 100%; text-align: left; margin-top: 8px; padding: 11px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--text); font-size: 15px; }
+.ticon { font-size: 34px; line-height: 1; }
+.maplink { font-weight: 700; }
+.past { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.hero.small { max-height: 160px; }
+
+#pull { position: fixed; top: calc(8px + env(safe-area-inset-top)); left: 50%; z-index: 30; width: 36px; height: 34px; margin-left: -18px; opacity: 0; pointer-events: none; color: var(--pink); transform: translate(-50%, 0) scale(.5); transition: opacity .15s; }
+#pull svg { width: 100%; height: 100%; }
+#pull.ready { color: var(--pink-d); }
+#pull.spin svg { animation: beat .6s ease-in-out infinite; }
+@keyframes beat { 0%,100% { transform: scale(1) } 50% { transform: scale(1.3) } }
