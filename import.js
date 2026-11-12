@@ -22,6 +22,32 @@ function safeUrl(v) {
   }
 }
 
+// Screenshots of posts come out of the reader with a lot of junk (buttons, counts, random
+// symbols). This keeps only lines that look like real words.
+const JUNK_LINE = /^(like|likes|liked by|reply|replies|comments?|view (all|more)|follow(ing)?|share|save|send|more|see (more|translation)|suggested|sponsored|add a comment|original audio|\d+\s*(k|m|likes?|comments?|views?|shares?)|\d+\s*(s|m|h|d|w|min|hr|hrs|sec)s?( ago)?)\b/i;
+function isReadable(line) {
+  const t = line.trim();
+  if (t.length < 4) return false;
+  if (JUNK_LINE.test(t)) return false;
+  const letters = (t.match(/[a-z]/gi) || []).length;
+  if (letters / t.length < 0.6) return false;
+  const words = t.split(/\s+/).filter((w) => /[a-z]/i.test(w));
+  if (!words.length) return false;
+  const real = words.filter((w) => {
+    const core = w.replace(/[^a-z]/gi, '');
+    if (core.length === 1) return /^(a|i)$/i.test(core);
+    if (core.length < 2) return false;
+    if (!/[aeiouy]/i.test(core)) return core.length <= 3 && /^[A-Z]+$/.test(core); // "BBQ" ok, "xkzq" not
+    if (/(.)\1\1/.test(core)) return false; // "aaa", "lll"
+    return /^[a-z]+$/i.test(core) ? !/^[A-Z]{1,}[a-z]*[A-Z]{2,}/.test(core) : true;
+  });
+  return real.length >= Math.max(1, Math.ceil(words.length * 0.6));
+}
+// Removes strange symbols the reader makes up, then tidies the spaces.
+function tidyLine(line) {
+  return line.replace(/[^A-Za-z0-9\s$.,'’!?&#@:;\/%()+-]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 // Turns pasted text into a first guess for the form fields. You always review it before saving.
 function parseImport(text) {
   const out = { title: '', address: '', cost: null, duration: null, seasons: [], tags: [], description: '' };
@@ -44,12 +70,21 @@ function parseImport(text) {
   out.seasons = out.seasons.filter((s) => (typeof SEASONS !== 'undefined' ? SEASONS.includes(s) : true));
 
   const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  // Address: only a 📍 line or a line that looks like a street address, and only normal address characters.
+  const addrOk = (a) => {
+    const t = a.replace(/[^A-Za-z0-9\s,.'#&/-]/g, ' ').replace(/\s+/g, ' ').trim();
+    return t.length >= 5 && /[A-Za-z]{3}/.test(t) && (t.match(/[A-Za-z]/g) || []).length / t.length >= 0.55 ? t.slice(0, 100) : '';
+  };
   const pin = lines.find((l) => /^📍/.test(l));
-  const street = lines.find((l) => /\b\d{1,5}\s+[\w .'-]+\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|pkwy|hwy)\b/i.test(l));
-  if (pin) out.address = pin.replace(/^📍\s*/, '').slice(0, 120);
-  else if (street) out.address = street.slice(0, 120);
+  const streetRe = /\b\d{1,5}\s+[A-Za-z][A-Za-z .'-]*\b(st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|pkwy|hwy)\b/i;
+  const street = (lines.map((l) => l.match(streetRe)).find(Boolean) || [''])[0];
+  if (pin) out.address = addrOk(pin.replace(/^📍\s*/, ''));
+  if (!out.address && street) out.address = addrOk(street);
 
-  const plain = lines.filter((l) => !/^https?:\/\//i.test(l) && !/^@/.test(l) && !/^(#[\w]+\s*)+$/.test(l) && !/^📍/.test(l));
+  const plain = lines
+    .filter((l) => !/^https?:\/\//i.test(l) && !/^@/.test(l) && !/^(#[\w]+\s*)+$/.test(l) && !/^📍/.test(l))
+    .map(tidyLine)
+    .filter(isReadable);
   const first = plain.find((l) => /[a-z]/i.test(l));
   if (first) out.title = first.replace(/#[\w]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
   const rest = plain.filter((l) => l !== first).join(' ').replace(/#[\w]+/g, '').replace(/\s+/g, ' ').trim();
@@ -71,7 +106,7 @@ function loadOcr() {
 function showImport() {
   let notes = '';
   let ocrText = '';
-  let file = null;
+  let files = [];
   let worker = null;
   let reading = false;
 
@@ -79,7 +114,7 @@ function showImport() {
   const discard = async () => {
     notes = '';
     ocrText = '';
-    file = null;
+    files = [];
     const w = worker;
     worker = null;
     if (w) {
@@ -106,8 +141,8 @@ function showImport() {
        <div class="field"><label>Paste the caption or your notes</label>
          <textarea id="imp-notes" placeholder="Sunset kayaking, $40, 2 hours, #outdoors"></textarea></div>
 
-       <div class="field"><label>Or read a screenshot</label>
-         <input type="file" id="imp-file" accept="image/*">
+       <div class="field"><label>Or read screenshots (add as many as you need)</label>
+         <input type="file" id="imp-file" accept="image/*" multiple>
          <p class="hint">The screenshot is read on your phone and is never uploaded or saved. The first time, a small reading tool (a few MB) downloads from the internet.</p>
          <div class="error" id="imp-status"></div></div>
 
@@ -133,29 +168,37 @@ function showImport() {
         const keep = $('#imp-keep').checked;
         if (keep && !link) return (err.textContent = 'Paste a link first, or untick "Keep source link".');
 
-        file = $('#imp-file').files[0] || null;
-        if (!notes.trim() && !file && !link) return (err.textContent = 'Paste a caption, add a screenshot, or paste a link.');
+        files = [...$('#imp-file').files];
+        if (!notes.trim() && !files.length && !link) return (err.textContent = 'Paste a caption, add a screenshot, or paste a link.');
 
         reading = true;
         const old = b.textContent;
         b.disabled = true;
         try {
-          if (file) {
+          if (files.length) {
             b.textContent = 'Reading screenshot…';
             const status = $('#imp-status');
             status.textContent = '';
             try {
               await loadOcr();
               worker = await window.Tesseract.createWorker('eng');
-              const res = await worker.recognize(file);
-              ocrText = (res && res.data && res.data.text) || '';
+              const parts = [];
+              for (let n = 0; n < files.length; n++) {
+                b.textContent = files.length > 1 ? `Reading screenshot ${n + 1} of ${files.length}…` : 'Reading screenshot…';
+                const res = await worker.recognize(files[n]);
+                const d = (res && res.data) || {};
+                // Keep only lines the reader is fairly sure about. Fall back to all the text if it gives no line scores.
+                const sure = Array.isArray(d.lines) && d.lines.length ? d.lines.filter((l) => (l.confidence == null ? 100 : l.confidence) >= 60).map((l) => l.text) : [d.text || ''];
+                parts.push(sure.join('\n'));
+              }
+              ocrText = parts.join('\n');
             } catch (e) {
               if (worker) { try { await worker.terminate(); } catch (x) { /* ignore */ } worker = null; }
               reading = false;
               b.disabled = false;
               b.textContent = old;
               status.textContent = 'Couldn’t read the screenshot. Check your internet and choose it again, or paste the text above and tap Fill in the form.';
-              file = null;
+              files = [];
               ocrText = '';
               $('#imp-file').value = ''; // forget the picture so you can go on with typed notes
               return;
