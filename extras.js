@@ -1,5 +1,7 @@
 'use strict';
 
+// testing feaatures
+
 // More features, kept in one file: tag icons, settings, tour, bulk add, address lookup,
 // share picture, pull-down refresh, and offline mode.
 // (These use helpers from app.js like $, openSheet, toast. They run later, after app.js has loaded.)
