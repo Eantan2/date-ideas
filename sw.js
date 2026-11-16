@@ -1,4 +1,4 @@
-// Keeps the app's own files so it opens quickly. Tries the network first so updates show up right away.
+// Keeps the app's own files so it opens quickly. Tries the network first so updates show up right away.good to test
 // It never touches requests to other sites (like Supabase), so your ideas are always fresh.
 const CACHE = 'date-ideas-v7';
 const SUPA = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
