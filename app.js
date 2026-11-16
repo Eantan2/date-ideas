@@ -1,5 +1,5 @@
 'use strict';
-#test
+// test
 // ---------- state ----------
 const SEASONS = ['Spring', 'Summer', 'Fall', 'Winter'];
 const BUCKET = 'photos';
