@@ -1,5 +1,5 @@
 -- Date Ideas: Supabase setup. Run this ONCE in Supabase > SQL Editor.
---
+-- Test this too
 -- BEFORE running: create both user accounts (Authentication > Users > Add user),
 -- then change the two email addresses in the LAST step (step 5) below.
 
