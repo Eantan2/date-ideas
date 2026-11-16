@@ -1,5 +1,6 @@
 -- Date Ideas: Supabase update for RECIPES and FEEDBACK.
 -- Run this ONCE in Supabase > SQL Editor. Run supabase-setup.sql first (you already did).
+-- big mega test
 
 -- 1. Recipes (shared by both of you)
 create table if not exists public.recipes (
