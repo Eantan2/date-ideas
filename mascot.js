@@ -1,5 +1,7 @@
 'use strict';
 
+//test that lil heart
+
 // The little heart character. Each call gives back an SVG picture as text.
 // Poses: 'wave' (hello), 'cheer' (celebrating), 'empty' (nothing here yet),
 //        'loading' (waiting), 'oops' (something went wrong),
