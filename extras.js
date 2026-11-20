@@ -409,7 +409,14 @@ function writeQueue(q) {
 }
 function queueOp(op) {
   let q = readQueue();
-  if (op.op === 'save') q = q.filter((x) => !(x.op === 'save' && x.table === op.table && x.obj.id === op.obj.id));
+  if (op.op === 'save') {
+    const same = (x) => x.op === 'save' && x.table === op.table && x.obj.id === op.obj.id;
+    // Several edits in a row become one waiting change. It keeps the oldest "before" picture,
+    // so that it still knows exactly which fields you changed.
+    const prev = q.find(same);
+    if (prev) op.base = prev.base || null;
+    q = q.filter((x) => !same(x));
+  }
   if (op.op === 'del') q = q.filter((x) => !(x.table === op.table && ((x.obj && x.obj.id) === op.id || x.id === op.id)));
   q.push({ ...op, t: new Date().toISOString() });
   writeQueue(q);
@@ -462,7 +469,14 @@ async function flushQueue() {
     if (stop) { rest.push(op); continue; }
     try {
       if (op.op === 'save') {
-        const { id, ...data } = op.obj;
+        const { id, ...rawData } = op.obj;
+        let data = rawData;
+        if (op.base) {
+          // Only put in the fields changed on this phone. Fields your partner changed meanwhile stay.
+          const { data: cur, error: e0 } = await sb.from(op.table).select('id,data').eq('id', id).maybeSingle();
+          if (e0) throw e0;
+          if (cur && cur.data) data = mergeChanges(cur.data, op.obj, op.base);
+        }
         const { error } = await sb.from(op.table).upsert({ id, data, updated_at: op.t });
         if (error) throw error;
       } else {
@@ -470,12 +484,41 @@ async function flushQueue() {
         if (error) throw error;
       }
     } catch (e) {
-      stop = true;
       rest.push(op);
+      // No internet: stop and try everything again later. Any other problem only holds back that
+      // one change, so it can't block the others.
+      if (isOffline() || /failed to fetch|network|load failed/i.test((e && e.message) || '')) stop = true;
     }
   }
   writeQueue(rest);
   return rest.length;
+}
+
+// Puts the changes that are still waiting to be sent on top of what was just loaded,
+// so a refresh never makes your unsent edits disappear from the screen.
+function applyQueue() {
+  if (!user) return;
+  for (const op of readQueue()) {
+    if (op.table === 'recipes' && !featuresReady) continue;
+    const list = op.table === 'ideas' ? ideas : op.table === 'recipes' ? recipes : null;
+    if (!list) continue;
+    const norm = normFor(op.table);
+    if (op.op === 'del') {
+      const k = list.findIndex((x) => x.id === op.id);
+      if (k >= 0) list.splice(k, 1);
+      continue;
+    }
+    if (!op.obj) continue;
+    const k = list.findIndex((x) => x.id === op.obj.id);
+    if (k < 0) {
+      list.push(norm({ ...op.obj }));
+      continue;
+    }
+    const { id, ...current } = list[k];
+    const merged = op.base ? mergeChanges(current, op.obj, op.base) : op.obj;
+    Object.keys(list[k]).forEach((key) => delete list[k][key]);
+    Object.assign(list[k], norm({ ...merged, id }));
+  }
 }
 
 function offlineBanner() {
