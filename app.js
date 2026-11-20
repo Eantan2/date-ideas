@@ -105,9 +105,9 @@ const DENS = [
   [/whole.?wheat flour/, 113],
   [/flour/, 120, /almond|coconut|rice|corn|oat|chickpea|buckwheat|spelt|rye|potato|tapioca/],
   [/butter/, 227, /peanut|almond|nut|cocoa|butter ?milk|shea/],
-  [/honey/, 340],
-  [/water/, 237, /coconut|rose|orange/],
-  [/milk/, 244, /condensed|evaporated|powder|butter ?milk/],
+  [/honey/, 340, /roasted|glazed|mustard|bbq|barbecue|nut|oat|cereal|cake|bun|ham|wheat/],
+  [/water/, 237, /coconut|rose|orange|melon|chestnut|cress|buffalo/],
+  [/milk/, 244, /condensed|evaporated|powder|butter ?milk|chocolate|shake|thistle|bread|biscuit/],
   [/(heavy|whipping|double) cream/, 238],
   [/\boil\b/, 218, /coconut|sesame|truffle|spray/],
   [/cocoa/, 85, /butter|nibs/],
@@ -238,7 +238,18 @@ async function busy(btn, label, fn) {
 async function loadIdeas() {
   const { data, error } = await sb.from('ideas').select('id,data');
   if (error) throw error;
-  const list = (data || []).map((r) => normalize({ ...r.data, id: r.id }));
+  // Keep the same objects for ideas that were already here, so a screen that is open keeps working
+  // with the newest data instead of an old copy.
+  const keepSame = (oldList, fresh) => {
+    const old = new Map(oldList.map((x) => [x.id, x]));
+    return fresh.map((n) => {
+      const o = old.get(n.id);
+      if (!o) return n;
+      Object.keys(o).forEach((k) => delete o[k]);
+      return Object.assign(o, n);
+    });
+  };
+  const list = keepSame(ideas, (data || []).map((r) => normalize({ ...r.data, id: r.id })));
   const paths = [...new Set(list.flatMap((i) => [i.image, i.donePhoto, ...i.history.map((h) => h.photo)]).filter(Boolean))];
   if (paths.length) {
     const { data: signed, error: e2 } = await sb.storage.from(BUCKET).createSignedUrls(paths, URL_TTL);
@@ -259,11 +270,12 @@ async function loadIdeas() {
   const realProblem = problems.find((e) => !isMissingTable(e));
   if (realProblem) throw realProblem;
   featuresReady = problems.length === 0;
-  recipes = featuresReady ? (rc.data || []).map((r) => normalizeRecipe({ ...r.data, id: r.id })) : [];
+  recipes = featuresReady ? keepSame(recipes, (rc.data || []).map((r) => normalizeRecipe({ ...r.data, id: r.id }))) : [];
   feedback = {};
   if (featuresReady) (fb.data || []).forEach((r) => (feedback[r.idea_id] = feedback[r.idea_id] || []).push(r));
 
   ideas = list;
+  applyQueue(); // changes that are still waiting to be sent stay visible
   loaded = true;
   loadFailed = false;
   offlineMode = false;
@@ -272,11 +284,46 @@ async function loadIdeas() {
   cacheNow();
 }
 
-async function saveRow(table, obj) {
-  if (isOffline()) return queueOp({ op: 'save', table, obj: JSON.parse(JSON.stringify(obj)) });
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const normFor = (table) => (table === 'ideas' ? normalize : table === 'recipes' ? normalizeRecipe : (x) => x);
+
+// Works out what to save when your partner may have changed the same item in the meantime.
+// It starts from the latest saved copy (`server`) and puts in only the fields that you changed
+// (`obj` compared with `base`, how the item looked before you changed it). Fields you did not
+// touch keep whatever your partner saved. If you both changed the very same field, yours wins.
+function mergeChanges(server, obj, base) {
+  const out = { ...server };
+  new Set([...Object.keys(obj), ...Object.keys(base)]).forEach((k) => {
+    if (k === 'id') return;
+    if (JSON.stringify(obj[k]) === JSON.stringify(base[k])) return;
+    if (obj[k] === undefined) delete out[k];
+    else out[k] = obj[k];
+  });
+  return out;
+}
+
+// `base` is optional: how the item looked before this change. Give it for items that already
+// exist, so a stale copy on this phone can't erase what your partner changed.
+async function saveRow(table, obj, base) {
+  if (isOffline()) return queueOp({ op: 'save', table, obj: clone(obj), base: base ? clone(base) : null });
   const { id, ...rest } = obj;
-  const { error } = await sb.from(table).upsert({ id, data: rest, updated_at: new Date().toISOString() });
+  let data = rest;
+  let merged = false;
+  if (base) {
+    const { data: cur, error: e0 } = await sb.from(table).select('id,data').eq('id', id).maybeSingle();
+    if (e0) throw e0;
+    if (cur && cur.data) {
+      data = mergeChanges(cur.data, obj, base);
+      merged = true;
+    }
+  }
+  const { error } = await sb.from(table).upsert({ id, data, updated_at: new Date().toISOString() });
   if (error) throw error;
+  if (merged) {
+    // Show what was really saved, including anything your partner changed.
+    Object.keys(obj).forEach((k) => { if (k !== 'id') delete obj[k]; });
+    Object.assign(obj, normFor(table)({ ...data }));
+  }
 }
 // Saves several rows in one go (used by "Add many ideas").
 async function saveRows(table, objs) {
@@ -291,8 +338,8 @@ async function deleteRow(table, id) {
   const { error } = await sb.from(table).delete().eq('id', id);
   if (error) throw error;
 }
-const saveIdea = (i) => saveRow('ideas', i);
-const saveRecipe = (r) => saveRow('recipes', r);
+const saveIdea = (i, base) => saveRow('ideas', i, base);
+const saveRecipe = (r, base) => saveRow('recipes', r, base);
 
 // True when the error means "this table doesn't exist yet" (supabase-update.sql not run).
 function isMissingTable(e) {
@@ -350,7 +397,7 @@ async function update(obj, change, saver = saveIdea) {
   const snap = JSON.parse(JSON.stringify(obj));
   change();
   try {
-    await saver(obj);
+    await saver(obj, snap);
   } catch (e) {
     Object.keys(obj).forEach((k) => delete obj[k]);
     Object.assign(obj, snap);
@@ -362,9 +409,14 @@ async function refresh() {
   const btn = $('#refreshBtn');
   btn.disabled = true;
   try {
-    if (isOffline()) throw new Error('offline');
+    if (isOffline()) {
+      // Offline is not an error: keep showing the saved copy and the offline notice.
+      offlineBanner();
+      renderList();
+      return false;
+    }
     await flushQueue(); // send waiting offline changes first
-    await loadIdeas();
+    await loadIdeas(); // anything still waiting is kept on screen
     setBanner('');
     offlineBanner();
     renderList();
@@ -1122,6 +1174,7 @@ function clRow(text = '', done = false) {
 
 function showForm(id, prefill) {
   const idea = id ? ideas.find((x) => x.id === id) : null;
+  const openSnap = idea ? clone(idea) : null; // how it looked when this form opened, to save only what you change
   const pf = !idea && prefill ? prefill : null; // first guess from an import, nothing is saved until Save
   const src = idea ? idea.sourceLink || '' : pf ? pf.sourceLink || '' : '';
   const pv = (k, d = '') => (pf && pf[k] != null ? pf[k] : d);
@@ -1185,7 +1238,7 @@ function showForm(id, prefill) {
          <div id="clList">${(idea ? idea.checklist : []).map((c) => clRow(c.text, c.done)).join('')}</div>
          <button type="button" class="btn ghost" style="margin-top:0" data-act="addrow">+ Add item</button></div>
 
-       ${src ? `<label class="keep"><input type="checkbox" id="f-keeplink" ${idea ? 'checked' : ''}> <span><b>Keep source link</b><br><span class="hint" style="margin:0;word-break:break-all">${esc(src)}<br>${esc(LINK_WARNING)}</span></span></label>` : ''}
+       ${src ? `<label class="keep"><input type="checkbox" id="f-keeplink" ${idea || pf ? 'checked' : ''}> <span><b>Keep source link</b><br><span class="hint" style="margin:0;word-break:break-all">${esc(src)}<br>${esc(LINK_WARNING)}</span></span></label>` : ''}
 
        <div class="error" id="formError"></div>
      </div>`,
@@ -1267,7 +1320,7 @@ function showForm(id, prefill) {
               imagePath = uploaded;
             }
             Object.assign(item, data, { image: imagePath });
-            await saveIdea(item);
+            await saveIdea(item, openSnap || undefined);
           } catch (e) {
             if (idea) {
               Object.keys(item).forEach((k) => delete item[k]);
@@ -1362,6 +1415,7 @@ function showRecipe(id, servings, keepScroll = false) {
 
 function showRecipeForm(id) {
   const rec = id ? recipes.find((x) => x.id === id) : null;
+  const openSnap = rec ? clone(rec) : null; // how it looked when this form opened
   openSheet(
     `<div class="sheet-head">
        <button class="link" data-act="cancel">Cancel</button>
@@ -1406,7 +1460,7 @@ function showRecipeForm(id) {
             source: $('#r-src').value.trim(),
           });
           try {
-            await saveRecipe(item);
+            await saveRecipe(item, openSnap || undefined);
           } catch (e) {
             if (rec) {
               Object.keys(item).forEach((k) => delete item[k]);
