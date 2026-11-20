@@ -287,43 +287,81 @@ async function loadIdeas() {
 const clone = (o) => JSON.parse(JSON.stringify(o));
 const normFor = (table) => (table === 'ideas' ? normalize : table === 'recipes' ? normalizeRecipe : (x) => x);
 
-// Works out what to save when your partner may have changed the same item in the meantime.
-// It starts from the latest saved copy (`server`) and puts in only the fields that you changed
-// (`obj` compared with `base`, how the item looked before you changed it). Fields you did not
-// touch keep whatever your partner saved. If you both changed the very same field, yours wins.
-function mergeChanges(server, obj, base) {
-  const out = { ...server };
-  new Set([...Object.keys(obj), ...Object.keys(base)]).forEach((k) => {
+// Which fields of `now` differ from `base` (how the item looked before the change).
+function diffFields(now, base) {
+  const set = {};
+  const del = [];
+  new Set([...Object.keys(now), ...Object.keys(base)]).forEach((k) => {
     if (k === 'id') return;
-    if (JSON.stringify(obj[k]) === JSON.stringify(base[k])) return;
-    if (obj[k] === undefined) delete out[k];
-    else out[k] = obj[k];
+    if (JSON.stringify(now[k]) === JSON.stringify(base[k])) return;
+    if (now[k] === undefined) del.push(k);
+    else set[k] = clone(now[k]);
   });
+  return { set, del };
+}
+// Puts a list of changes on top of the latest saved copy. Fields that were not changed stay as saved.
+function applyChanges(server, ch) {
+  const out = { ...server, ...ch.set };
+  ch.del.forEach((k) => delete out[k]);
   return out;
 }
+// Used for changes that waited offline: the latest saved copy plus only the fields changed on this phone.
+const mergeChanges = (server, obj, base) => applyChanges(server, diffFields(obj, base));
 
-// `base` is optional: how the item looked before this change. Give it for items that already
-// exist, so a stale copy on this phone can't erase what your partner changed.
+// Saving an item that already exists. `base` is how it looked before this change. Only the fields
+// changed here are written, on top of the latest saved copy, so your partner's changes survive.
+// What to write is fixed the moment you tap, and saves of the same item run one after another,
+// so two quick taps can never undo each other.
+const saveChains = new Map();
 async function saveRow(table, obj, base) {
   if (isOffline()) return queueOp({ op: 'save', table, obj: clone(obj), base: base ? clone(base) : null });
   const { id, ...rest } = obj;
-  let data = rest;
-  let merged = false;
-  if (base) {
-    const { data: cur, error: e0 } = await sb.from(table).select('id,data').eq('id', id).maybeSingle();
-    if (e0) throw e0;
-    if (cur && cur.data) {
-      data = mergeChanges(cur.data, obj, base);
-      merged = true;
-    }
+  if (!base) {
+    const { error } = await sb.from(table).upsert({ id, data: rest, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  const sent = clone(obj); // the item as it is right now
+  const ch = diffFields(sent, base); // exactly what this save changes
+  const key = table + ':' + id;
+  const run = (saveChains.get(key) || Promise.resolve()).catch(() => {}).then(() => writeMerged(table, id, obj, sent, ch));
+  saveChains.set(key, run);
+  try {
+    await run;
+  } finally {
+    if (saveChains.get(key) === run) saveChains.delete(key);
+  }
+}
+async function writeMerged(table, id, obj, sent, ch) {
+  const { data: cur, error: e0 } = await sb.from(table).select('id,data').eq('id', id).maybeSingle();
+  if (e0) throw e0;
+  let data;
+  if (cur && cur.data) data = applyChanges(cur.data, ch);
+  else {
+    const { id: _id, ...whole } = sent; // it was deleted somewhere else: save this whole copy again
+    data = whole;
   }
   const { error } = await sb.from(table).upsert({ id, data, updated_at: new Date().toISOString() });
   if (error) throw error;
-  if (merged) {
-    // Show what was really saved, including anything your partner changed.
-    Object.keys(obj).forEach((k) => { if (k !== 'id') delete obj[k]; });
-    Object.assign(obj, normFor(table)({ ...data }));
-  }
+  // Take over what your partner changed, but never replace anything that was changed here since.
+  const fresh = normFor(table)({ ...data, id });
+  let changed = false;
+  Object.keys(fresh).forEach((k) => {
+    if (k === 'id' || k in ch.set) return;
+    const untouched = JSON.stringify(obj[k]) === JSON.stringify(sent[k]);
+    if (untouched && JSON.stringify(obj[k]) !== JSON.stringify(fresh[k])) {
+      obj[k] = fresh[k];
+      changed = true;
+    }
+  });
+  Object.keys(sent).forEach((k) => {
+    if (k === 'id' || k in ch.set || k in fresh) return;
+    if (JSON.stringify(obj[k]) === JSON.stringify(sent[k])) {
+      delete obj[k];
+      changed = true;
+    }
+  });
+  if (changed) syncOpenDetail();
 }
 // Saves several rows in one go (used by "Add many ideas").
 async function saveRows(table, objs) {
@@ -394,13 +432,19 @@ function removePhotos(paths) {
 
 // Changes something and saves it. If saving fails, the change is undone.
 async function update(obj, change, saver = saveIdea) {
-  const snap = JSON.parse(JSON.stringify(obj));
+  const snap = clone(obj);
   change();
+  const ch = diffFields(obj, snap);
   try {
     await saver(obj, snap);
   } catch (e) {
-    Object.keys(obj).forEach((k) => delete obj[k]);
-    Object.assign(obj, snap);
+    // Undo only the fields this change touched, and only if nothing newer has changed them since.
+    Object.keys(ch.set).forEach((k) => {
+      if (JSON.stringify(obj[k]) !== JSON.stringify(ch.set[k])) return;
+      if (snap[k] === undefined) delete obj[k];
+      else obj[k] = snap[k];
+    });
+    ch.del.forEach((k) => { if (!(k in obj)) obj[k] = snap[k]; });
     throw e;
   }
 }
@@ -417,6 +461,7 @@ async function refresh() {
     }
     await flushQueue(); // send waiting offline changes first
     await loadIdeas(); // anything still waiting is kept on screen
+    syncOpenDetail(); // an open idea screen keeps its checklist in step
     setBanner('');
     offlineBanner();
     renderList();
@@ -970,16 +1015,34 @@ function syncReactions(id) {
   if (bl) bl.innerHTML = bothLoveHtml(id);
 }
 
+// The checklist part of the detail screen. It sits in its own box so it can be redrawn alone
+// (see syncOpenDetail) without touching a comment you are typing.
+function checklistHtml(i) {
+  return i.checklist.length
+    ? `<div class="sec">Checklist</div>` +
+        i.checklist
+          .map((c, n) => `<label class="check ${c.done ? 'on' : ''}"><input type="checkbox" data-n="${n}" ${c.done ? 'checked' : ''}><span>${esc(c.text)}</span></label>`)
+          .join('')
+    : '';
+}
+// If the checklist changed behind the open screen (a refresh, or your partner's save), redraw just
+// that box, so every checkbox still points at the item it shows.
+function syncOpenDetail() {
+  const box = $('#clBox');
+  if (!box) return;
+  const i = ideas.find((x) => x.id === box.dataset.id);
+  if (!i) return;
+  const sig = JSON.stringify(i.checklist);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = checklistHtml(i);
+}
+
 function showDetail(id) {
   const i = ideas.find((x) => x.id === id);
   if (!i || hiddenSurprise(i)) return closeSheet();
 
-  const checklist = i.checklist.length
-    ? `<div class="sec">Checklist</div>` +
-      i.checklist
-        .map((c, n) => `<label class="check ${c.done ? 'on' : ''}"><input type="checkbox" data-n="${n}" ${c.done ? 'checked' : ''}><span>${esc(c.text)}</span></label>`)
-        .join('')
-    : '';
+  const checklist = `<div id="clBox" data-id="${esc(i.id)}" data-sig="${esc(JSON.stringify(i.checklist))}">${checklistHtml(i)}</div>`;
 
   const doneImg = photoUrl(i.donePhoto);
   const finish = i.done
@@ -1125,22 +1188,27 @@ function showDetail(id) {
   );
   const detailToken = sheetToken; // identifies this screen, for the slow saves below
 
-  // tick checklist items
-  $$('.check input', $('#sheetInner')).forEach((cb) =>
-    cb.addEventListener('change', async () => {
-      const n = Number(cb.dataset.n);
-      const want = cb.checked;
-      try {
-        await update(i, () => {
-          i.checklist[n].done = want;
-        });
-        cb.closest('.check').classList.toggle('on', want);
-      } catch (e) {
-        cb.checked = !want;
-        toast(errText('save', e), true);
-      }
-    })
-  );
+  // tick checklist items (one listener for the whole box, so a redrawn box keeps working)
+  $('#clBox').addEventListener('change', async (e) => {
+    const cb = e.target.closest('input[data-n]');
+    if (!cb) return;
+    const n = Number(cb.dataset.n);
+    const want = cb.checked;
+    if (!i.checklist[n]) {
+      cb.checked = !want;
+      return;
+    }
+    try {
+      await update(i, () => {
+        i.checklist[n].done = want;
+      });
+      const row = cb.closest('.check');
+      if (row) row.classList.toggle('on', want);
+    } catch (err) {
+      cb.checked = !want;
+      toast(errText('save', err), true);
+    }
+  });
 
   // change the "we did it" photo for an idea that is already done
   if (i.done) {
