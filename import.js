@@ -59,11 +59,25 @@ const STATE_NAMES = 'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connect
 const STREET_WORD = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Pkwy|Parkway|Hwy|Highway|Ct|Court|Pl|Place|Ter|Terrace|Cir|Circle|Trl|Trail|Sq|Square|Plz|Plaza|Loop|Pike|Row|Alley|Path|Broadway|ST|STREET|AVE|AVENUE|RD|ROAD|BLVD|DR|DRIVE|LN|LANE|CT|HWY';
 const CITY = "[A-Z][A-Za-z.'’-]*(?: [A-Z][A-Za-z.'’-]*){0,3}";
 // "482 Maple Street, Springfield, IL 62704": number, street, then the city, state and zip if they are there.
+// Makes a word list ignore capital letters: "St|Rd" -> "[sS][tT]|[rR][dD]". Only the street part is relaxed,
+// so people can type "482 maple street"; the city and state still need capitals.
+const anyCase = (str) => str.replace(/[A-Za-z]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`);
+const NOT_A_STREET_WORD = anyCase('for|and|the|a|an|of|to|with|at|in|on|is|are|or|am|pm|hours?|hrs?|minutes?|mins?|people|years?|days?|miles?|off');
 const ADDRESS_RE = new RegExp(
-  String.raw`\b\d{1,6}[A-Za-z]?\s+(?:(?:(?:N|S|E|W|NE|NW|SE|SW)\.?|North|South|East|West)\s+)?(?:(?:[A-Z][A-Za-z'’.-]*|\d{1,3}(?:st|nd|rd|th))\s+){0,4}?(?:${STREET_WORD})\b\.?` +
+  String.raw`\b\d{1,6}[A-Za-z]?\s+(?!(?:${NOT_A_STREET_WORD})\b)(?:(?:(?:N|S|E|W|NE|NW|SE|SW)\.?|North|South|East|West|north|south|east|west)\s+)?(?:(?!(?:${NOT_A_STREET_WORD})\b)(?:[A-Za-z][A-Za-z'’.-]*|\d{1,3}(?:st|nd|rd|th))\s+){0,4}?(?:${anyCase(STREET_WORD)})\b\.?` +
     String.raw`(?:\s*,?\s*(?:#|Suite|Ste\.?|Unit|Apt\.?|Floor|Fl\.?)\s*[A-Za-z0-9-]+)?` +
     String.raw`(?:\s*,\s*${CITY}(?:\s*,\s*(?:${STATE_NAMES})|,?\s+(?:${STATE_ABBR})\b)?(?:\s+\d{5}(?:-\d{4})?)?|\s+${CITY},?\s+(?:${STATE_ABBR})\b(?:\s+\d{5}(?:-\d{4})?)?)?`
 );
+// The first address-looking piece that is not a price like "$20 for dinner and a drive".
+function findAddress(text) {
+  const re = new RegExp(ADDRESS_RE.source, 'g');
+  let m;
+  while ((m = re.exec(text))) {
+    if (text.charAt(m.index - 1) !== '$') return m;
+    re.lastIndex = m.index + 1;
+  }
+  return null;
+}
 // "Springfield, Illinois" or "Springfield, IL": a place with no street.
 const CITY_ONLY_RE = new RegExp(`^(?:[A-Z][\\w'’&.-]*(?: [A-Z][\\w'’&.-]*){0,4},\\s*)?${CITY},\\s*(?:${STATE_NAMES}|${STATE_ABBR})$`);
 
@@ -79,6 +93,8 @@ function lineRole(t) {
   if (JUNK_LINE.test(s)) return 'chrome';
   if (/\b\d+\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s+ago\b/i.test(s)) return 'chrome';
   if (/^(view|see)\s+(all|more)\b/i.test(s)) return 'chrome';
+  if (/^\S+\s+(follow|following|message)$/i.test(s)) return 'chrome'; // "username Follow"
+  if (/^add a comment\b/i.test(s)) return 'chrome';
   if (/^(original (sound|audio)|[♬♪])/i.test(s)) return 'chrome';
   const words = s.toLowerCase().replace(/[^a-z&\s]/g, ' ').split(/\s+/).filter(Boolean);
   if (!words.length || words.every((w) => UI_WORDS.has(w))) return 'chrome';
@@ -110,6 +126,16 @@ function fixShouting(t) {
       return n > 0 && SMALL_WORDS.has(lw) ? lw : lw.charAt(0).toUpperCase() + lw.slice(1);
     })
     .join(' ');
+}
+// "Dinner at 7pm" -> "Dinner": takes the day and time out of a line so the rest can still be the name.
+function stripWhen(t) {
+  return t
+    .replace(/\b(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?s?\b\.?,?\s*)/gi, ' ')
+    .replace(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\b,?/gi, ' ')
+    .replace(/\b(?:at|on|@|from|until|till)?\s*\d{1,2}(?::\d{2})?\s*[ap]\.?m\b\.?/gi, ' ')
+    .replace(/\s+(?:at|on|@|from|until|till)\s*$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 const trimEdges = (t) => t.replace(/^[\s\-–—:,;|•·]+|[\s\-–—:,;|•·]+$/g, '').trim();
 // A typical letter height: a bit below the middle, so a few big title lines don't pull it up.
@@ -204,7 +230,7 @@ function parseImport(text, ocrLines) {
     flat.push({ start: flatText.length, end: flatText.length + k.text.length, idx });
     flatText += k.text;
   });
-  let addrMatch = ADDRESS_RE.exec(flatText);
+  let addrMatch = findAddress(flatText);
   let addrEntry = -1;
   let nameInText = '';
   if (addrMatch) {
@@ -219,14 +245,20 @@ function parseImport(text, ocrLines) {
     if (t.length >= 3 && /[A-Za-z]{3}/.test(t)) out.address = t.slice(0, 100);
   }
   if (!out.address && cityLine) out.address = cityLine.slice(0, 100);
+  else if (out.address && cityLine && addrMatch) {
+    // "482 Maple Street" then "Springfield, IL" on the next line: put them together.
+    const cityPart = cityLine.split(',').slice(-2).join(',').trim();
+    if (cityPart && !out.address.toLowerCase().includes(cityPart.split(',')[0].trim().toLowerCase())) out.address = `${out.address}, ${cityPart}`.slice(0, 100);
+  }
   // A location tag like "Lakeside Bowl, Austin, Texas": the part before the city is the place name.
   if (!nameInText && cityLine && cityLine.split(',').length >= 3 && looksLikeName(cityLine.split(',')[0])) nameInText = cityLine.split(',')[0].trim();
 
   // Name: score each line. Big letters, a name-like look, and place words score high.
   const cands = [];
   kept.forEach((k, idx) => {
-    if (k.role !== 'none' || idx === addrEntry && !nameInText && ADDRESS_RE.test(k.text) && k.text.replace(ADDRESS_RE, '').trim().length < 3) return;
+    if ((k.role !== 'none' && k.role !== 'when') || idx === addrEntry && !nameInText && ADDRESS_RE.test(k.text) && k.text.replace(ADDRESS_RE, '').trim().length < 3) return;
     let t = k.text;
+    if (k.role === 'when') t = stripWhen(t);
     if (idx === addrEntry && addrMatch) t = t.replace(ADDRESS_RE, ' ').replace(nameInText, ' ');
     const seg = t.split(/\s+[-–—|]\s+/)[0]; // "Blue Door Cafe - the coziest spot" -> "Blue Door Cafe"
     t = trimEdges(seg.length >= 3 ? seg : t);
@@ -279,7 +311,7 @@ function parseImport(text, ocrLines) {
     if (piece) desc = desc.replace(piece, ' ');
   });
   desc = desc.replace(/\s+([,.;!?])/g, '$1').replace(/([.!?])\s*[.,;]\s*/g, '$1 ').replace(/^[\s,.;\-–—:]+/, '').replace(/\s+/g, ' ').trim();
-  out.description = desc.slice(0, 400);
+  out.description = desc.slice(0, 1500);
   return out;
 }
 
