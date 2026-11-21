@@ -220,6 +220,12 @@ a { color: var(--pink-d); }
   html:not([data-theme=light]) .card.c3 { background: #8FB39A; }
   html:not([data-theme=light]) .banner { background: #4A2A22; color: #F6B8A8; }
   html:not([data-theme=light]) .chip { background: #4A3128; }
+  /* the small labels on the coloured cards keep their light look, so they stay readable */
+  html:not([data-theme=light]) .card .chip { background: rgba(255,255,255,.55); color: #3A2A24; }
+  html:not([data-theme=light]) .card.c0 .chip, html:not([data-theme=light]) .card.c4 .chip { background: rgba(0,0,0,.2); color: #fff; }
+  html:not([data-theme=light]) .card .chip.ok { background: #FFFFFF; color: #2E7A55; }
+  html:not([data-theme=light]) .card .chip.gift { background: #fff; color: var(--clay); }
+  html:not([data-theme=light]) .btn.danger { color: #F28B7C; border-color: #6B3A30; }
 }
 html[data-theme=dark] {
   color-scheme: dark;
@@ -235,6 +241,11 @@ html[data-theme=dark] .card.c2 { background: #D9A441; }
 html[data-theme=dark] .card.c3 { background: #8FB39A; }
 html[data-theme=dark] .banner { background: #4A2A22; color: #F6B8A8; }
 html[data-theme=dark] .chip { background: #4A3128; }
+html[data-theme=dark] .card .chip { background: rgba(255,255,255,.55); color: #3A2A24; }
+html[data-theme=dark] .card.c0 .chip, html[data-theme=dark] .card.c4 .chip { background: rgba(0,0,0,.2); color: #fff; }
+html[data-theme=dark] .card .chip.ok { background: #FFFFFF; color: #2E7A55; }
+html[data-theme=dark] .card .chip.gift { background: #fff; color: var(--clay); }
+html[data-theme=dark] .btn.danger { color: #F28B7C; border-color: #6B3A30; }
 .welcome .mascot, .empty .mascot { color: #3A2A24; }
 @media (prefers-color-scheme: dark) { html:not([data-theme=light]) .empty .mascot, html:not([data-theme=light]) .login-mascot .mascot { color: #F6E9DF; } }
 html[data-theme=dark] .empty .mascot, html[data-theme=dark] .login-mascot .mascot { color: #F6E9DF; }
