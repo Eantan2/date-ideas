@@ -1291,7 +1291,8 @@ function showForm(id, prefill) {
          <input type="text" id="f-tags" value="${esc(idea ? idea.tags.join(', ') : pv('tags', []).join(', '))}" placeholder="rainy day, outdoors, cozy" autocapitalize="none"></div>
 
        <div class="field"><label>Description</label>
-         <textarea id="f-description">${esc(idea ? idea.description : pv('description'))}</textarea></div>
+         <textarea id="f-description" class="desc-box">${esc(idea ? idea.description : pv('description'))}</textarea>
+         <button type="button" class="link" style="padding:6px 0 0" data-act="descsize" id="descSize">⤢ Show all</button></div>
 
        <div class="field"><label>Notes</label>
          <textarea id="f-notes">${esc(idea ? idea.notes : '')}</textarea></div>
@@ -1314,6 +1315,13 @@ function showForm(id, prefill) {
       import: () => showImport(),
       bulk: () => showBulk(),
       lookup: (b) => runLookup(b),
+      descsize: (b) => {
+        // Grow the box to fit all the text, or shrink it back to a short box you can scroll.
+        const t = $('#f-description');
+        const open = t.classList.toggle('open');
+        t.style.height = open ? `${t.scrollHeight + 4}px` : '';
+        b.textContent = open ? '⤡ Show less' : '⤢ Show all';
+      },
       pickaddr: (b) => {
         $('#f-address').value = b.dataset.a;
         $('#lookupBox').innerHTML = '';
